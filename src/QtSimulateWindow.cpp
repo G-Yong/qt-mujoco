@@ -2,7 +2,7 @@
 #include "QtPlatformUIAdapter.h"
 
 #include "simulate.h"               // 官方
-#include "platform_ui_adapter.h"
+// #include "platform_ui_adapter.h"
 #include <mujoco/mujoco.h>
 #include <mujoco/mjui.h>
 
@@ -14,6 +14,11 @@
 #include <QResizeEvent>
 #include <QExposeEvent>
 #include <QEvent>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QMimeData>
+#include <QUrl>
+#include <QFileInfo>
 #include <QGuiApplication>
 #include <QScreen>
 #include <QDebug>
@@ -137,6 +142,41 @@ void QtSimulateWindow::postToggleFullscreen() {
 // ----------------------------------------------------------------- Qt 事件 ----
 bool QtSimulateWindow::event(QEvent *e) {
     if (e->type() == QEvent::Close && m_adapterRaw) m_adapterRaw->PostClose();
+
+    if (e->type() == QEvent::DragEnter) {
+        auto *de = static_cast<QDragEnterEvent *>(e);
+        if (de->mimeData()->hasUrls()) {
+            for (const QUrl &u : de->mimeData()->urls()) {
+                if (u.isLocalFile()) {
+                    const QString suf = QFileInfo(u.toLocalFile()).suffix().toLower();
+                    if (suf == "xml" || suf == "mjb") {
+                        de->acceptProposedAction();
+                        return true;
+                    }
+                }
+            }
+        }
+        return true; // consume even if not accepted
+    }
+
+    if (e->type() == QEvent::Drop) {
+        auto *de = static_cast<QDropEvent *>(e);
+        if (de->mimeData()->hasUrls()) {
+            for (const QUrl &u : de->mimeData()->urls()) {
+                if (u.isLocalFile()) {
+                    const QString path = u.toLocalFile();
+                    const QString suf  = QFileInfo(path).suffix().toLower();
+                    if (suf == "xml" || suf == "mjb") {
+                        loadModel(path);
+                        de->acceptProposedAction();
+                        return true;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
     return QWindow::event(e);
 }
 void QtSimulateWindow::exposeEvent(QExposeEvent *) { updateGeometryToAdapter(); }

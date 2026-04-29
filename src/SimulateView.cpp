@@ -13,6 +13,9 @@ SimulateView::SimulateView(QWidget *parent) : QWidget(parent) {
     QWidget *container = QWidget::createWindowContainer(m_window, this);
     container->setMinimumSize(640, 480);
     container->setFocusPolicy(Qt::StrongFocus);
+    // 让容器控件的 HWND 也注册为 OLE 拖放目标，拦截拖到容器上的事件
+    container->setAcceptDrops(true);
+    container->installEventFilter(this);
 
     auto *lay = new QVBoxLayout(this);
     lay->setContentsMargins(0,0,0,0);
@@ -51,4 +54,17 @@ void SimulateView::dropEvent(QDropEvent *e) {
             return;
         }
     }
+}
+
+// 拦截容器控件的拖放事件，转发给 SimulateView 的 dragEnterEvent / dropEvent
+bool SimulateView::eventFilter(QObject *obj, QEvent *e) {
+    if (e->type() == QEvent::DragEnter) {
+        dragEnterEvent(static_cast<QDragEnterEvent *>(e));
+        return true;
+    }
+    if (e->type() == QEvent::Drop) {
+        dropEvent(static_cast<QDropEvent *>(e));
+        return true;
+    }
+    return QWidget::eventFilter(obj, e);
 }

@@ -26,6 +26,7 @@ public:
 protected:
     void dragEnterEvent(QDragEnterEvent *e) override;
     void dropEvent(QDropEvent *e) override;
+    bool eventFilter(QObject *obj, QEvent *e) override;
 
 private:
     QtSimulateWindow *m_window = nullptr;
