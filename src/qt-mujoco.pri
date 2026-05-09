@@ -1,13 +1,14 @@
 HEADERS += \
     $$PWD/QtPlatformUIAdapter.h \
-    $$PWD/QtSimulateWindow.h \
-    $$PWD/SimulateView.h \
+    $$PWD/MujocoQuickItem.h \
     $$PWD/lodepng.h
 
 SOURCES += \
     $$PWD/QtPlatformUIAdapter.cpp \
-    $$PWD/QtSimulateWindow.cpp \
-    $$PWD/SimulateView.cpp
+    $$PWD/MujocoQuickItem.cpp
+
+# Quick / QML 集成需要 quick 模块
+QT *= core gui qml quick
 
 
 MUJOCO_DIR = $$PWD/../mujoco-3.8.0-windows-x86_64

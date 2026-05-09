@@ -3,7 +3,7 @@
 #  Qt 5.15.2 + MuJoCo 3.8.0 集成演示 (qmake)
 #-------------------------------------------------
 
-QT       += core gui widgets opengl
+QT       += core gui qml quick
 CONFIG   += c++17
 TARGET    = demo
 TEMPLATE  = app
@@ -17,7 +17,9 @@ win32-msvc* {
 include(../src/qt-mujoco.pri)
 
 # ----------------------------------------------------------------------------
-# 源文件
+# 源文件 / 资源
 # ----------------------------------------------------------------------------
 SOURCES += \
     main.cpp
+
+RESOURCES += qml.qrc
