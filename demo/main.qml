@@ -35,6 +35,7 @@ Item {
 
     MujocoView {
         id: mujoco
+        objectName: "mujocoView"
         anchors.fill: parent
         focus: true
         leftUiVisible: false
