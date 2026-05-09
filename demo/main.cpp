@@ -4,10 +4,8 @@
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QSurfaceFormat>
-
-#if defined(_WIN32)
-#  include <windows.h>
-#endif
+#include <QQuickWidget>
+#include <QApplication>
 
 #ifndef ASSETS_DIR
 #define ASSETS_DIR "."
@@ -47,19 +45,20 @@ int main(int argc, char *argv[])
     fmt.setStencilBufferSize(8);
     QSurfaceFormat::setDefaultFormat(fmt);
 
-    QGuiApplication app(argc, argv);
+    QApplication app(argc, argv);
 
     // 注册 QML 类型
     qmlRegisterType<MujocoQuickItem>("Mujoco", 1, 0, "MujocoView");
 
-    QQmlApplicationEngine engine;
+    QQuickWidget *view = new QQuickWidget();
     // 默认模型路径 —— 改成你自己的路径
-    engine.rootContext()->setContextProperty(
+    view->engine()->rootContext()->setContextProperty(
         "initialXmlPath",
         QStringLiteral("C:/Users/Administrator/Desktop/robotSim/qt-mujoco/"
                        "mujoco-3.8.0-windows-x86_64/model/cards/cards.xml"));
+    view->setResizeMode(QQuickWidget::SizeRootObjectToView);
+    view->setSource(QUrl("qrc:/main.qml"));
+    view->show();
 
-    engine.load(QUrl(QStringLiteral("qrc:/main.qml")));
-    if (engine.rootObjects().isEmpty()) return -1;
     return app.exec();
 }

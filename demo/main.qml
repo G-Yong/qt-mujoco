@@ -1,13 +1,11 @@
 import QtQuick 2.15
-import QtQuick.Window 2.15
 import Mujoco 1.0
 
-Window {
+Item {
     id: root
     width: 1280
     height: 768
     visible: true
-    title: qsTr("MuJoCo Simulate in Qt (QML)")
 
     // 默认加载的模型路径（可由命令行 / C++ 端注入覆盖）
     property string initialXml: typeof initialXmlPath !== "undefined"

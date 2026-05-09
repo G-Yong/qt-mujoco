@@ -3,7 +3,7 @@
 #  Qt 5.15.2 + MuJoCo 3.8.0 集成演示 (qmake)
 #-------------------------------------------------
 
-QT       += core gui qml quick
+QT       += core gui qml quick quickwidgets
 CONFIG   += c++17
 TARGET    = demo
 TEMPLATE  = app
