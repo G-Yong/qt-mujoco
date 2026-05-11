@@ -1,6 +1,6 @@
 # qt-mujoco
 
-将 MuJoCo 官方 `Simulate` 查看器以 QML 组件的形式嵌入 Qt Quick 应用的集成库。无需 GLFW，直接在 QML 场景中运行完整的 MuJoCo 物理仿真与交互式 3D 渲染。
+将 [MuJoCo](https://github.com/google-deepmind/mujoco) 官方 [`Simulate`](https://github.com/google-deepmind/mujoco/tree/main/simulate) 查看器以 QML 组件的形式嵌入 Qt Quick 应用的集成库。无需 GLFW，直接在 QML 场景中运行完整的 MuJoCo 物理仿真与交互式 3D 渲染。
 
 ## 效果
 
