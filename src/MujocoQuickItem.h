@@ -32,6 +32,7 @@
 
 class QOpenGLContext;
 class QOffscreenSurface;
+class QTemporaryFile;
 
 namespace mujoco { class Simulate; }
 
@@ -60,9 +61,20 @@ public:
     QString xmlPath() const { return m_xmlPath; }
     void    setXmlPath(const QString& path);
 
-    Q_INVOKABLE void start(const QString& filename = QString());
-    Q_INVOKABLE void stop();
-    Q_INVOKABLE void loadModel(const QString& filename);
+    // 场景生命周期 ---------------------------------------------------------
+    // loadScene: 从磁盘加载 .xml / .mjb 场景；
+    //   (GL context / 渲染线程 / 物理线程)。返回值表示请求是否被接受 (同步
+    //   阶段的输入校验)，实际加载结果通过 sceneLoaded / sceneLoadFailed
+    //   信号异步通知。
+    Q_INVOKABLE bool loadScene(const QString& filename);
+    // loadSceneFromData: 从内存缓冲加载场景。format 指定数据格式，可取
+    //   "xml" 或 "mjb"。内部通过临时文件方式转交给 mujoco 加载流程。
+    Q_INVOKABLE bool loadSceneFromData(const QByteArray& data,
+                                       const QString& format = QStringLiteral("xml"));
+    // closeScene: 关闭当前场景并释放渲染/物理线程及相关资源。
+    Q_INVOKABLE void closeScene();
+    // lastError: 最近一次加载失败的错误信息 (中文/英文均可，由底层提供)。
+    Q_INVOKABLE QString lastError() const;
 
     Q_INVOKABLE bool toggleSimulationRunning();
     Q_INVOKABLE bool stepSimulationForward();
@@ -163,6 +175,10 @@ signals:
     void rightUiVisibleChanged();
     void modelTitleChanged();
 
+    // 场景加载结果通知
+    void sceneLoaded(const QString& source);
+    void sceneLoadFailed(const QString& reason);
+
 protected:
     void mousePressEvent(QMouseEvent*) override;
     void mouseReleaseEvent(QMouseEvent*) override;
@@ -189,6 +205,11 @@ private:
     int  qtMouseButtonToInternal(int btn) const;
     int  qtKeyToMjui(int key) const;
     void updateModifiersFrom(int qtMods);
+
+    // 启动后端 (GL context + 渲染/物理线程)。幂等：已启动时直接返回 true。
+    bool ensureBackendStarted();
+    // 设置最近一次错误信息 (线程安全)。
+    void setLastError(const QString& err);
 
     QString m_xmlPath;
 
@@ -220,4 +241,10 @@ private:
     std::mutex        m_pendingMtx;
     QString           m_pendingFile;
     std::atomic<bool> m_hasPendingLoad {false};
+
+    mutable std::mutex m_errorMtx;
+    QString            m_lastError;
+
+    // loadSceneFromData 写入的临时文件，需保持存活直到下次加载或关闭。
+    std::unique_ptr<QTemporaryFile> m_tempSceneFile;
 };

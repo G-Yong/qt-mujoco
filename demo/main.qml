@@ -43,9 +43,7 @@ Item {
 
         Component.onCompleted: {
             if (root.initialXml.length > 0)
-                start(root.initialXml)
-            else
-                start()
+                loadScene(root.initialXml)
         }
     }
 
@@ -60,7 +58,7 @@ Item {
                 if (lower.endsWith(".xml") || lower.endsWith(".mjb")) {
                     var path = u.startsWith("file:///")
                                 ? u.substring(8) : u;
-                    mujoco.loadModel(decodeURIComponent(path));
+                    mujoco.loadScene(decodeURIComponent(path));
                     drop.acceptProposedAction();
                     return;
                 }

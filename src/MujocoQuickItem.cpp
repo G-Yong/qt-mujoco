@@ -21,6 +21,9 @@
 #include <QMetaObject>
 #include <QThread>
 #include <QSGSimpleTextureNode>
+#include <QFileInfo>
+#include <QTemporaryFile>
+#include <QDir>
 
 #include <chrono>
 #include <cstdio>
@@ -133,7 +136,7 @@ MujocoQuickItem::MujocoQuickItem(QQuickItem* parent)
     setActiveFocusOnTab(true);
 }
 
-MujocoQuickItem::~MujocoQuickItem() { stop(); }
+MujocoQuickItem::~MujocoQuickItem() { closeScene(); }
 
 QQuickFramebufferObject::Renderer* MujocoQuickItem::createRenderer() const {
     return new MujocoFboRenderer();
@@ -143,7 +146,7 @@ void MujocoQuickItem::setXmlPath(const QString& path) {
     if (m_xmlPath == path) return;
     m_xmlPath = path;
     emit xmlPathChanged();
-    if (m_running.load()) loadModel(path);
+    if (m_running.load()) loadScene(path);
 }
 
 unsigned int MujocoQuickItem::currentSourceTexture() const {
@@ -158,21 +161,20 @@ void MujocoQuickItem::notifyFrameConsumed() {
     if (m_adapterRaw) m_adapterRaw->NotifyConsumed();
 }
 
-// ----------------------------------------------------------------- 启停 ----
-void MujocoQuickItem::start(const QString& filename) {
-    if (m_running.exchange(true)) {
-        if (!filename.isEmpty()) loadModel(filename);
-        return;
-    }
+// ----------------------------------------------------------------- 场景生命周期 ----
+void MujocoQuickItem::setLastError(const QString& err) {
+    std::lock_guard<std::mutex> lk(m_errorMtx);
+    m_lastError = err;
+}
 
-    if (!filename.isEmpty()) {
-        std::lock_guard<std::mutex> lk(m_pendingMtx);
-        m_pendingFile = filename;
-        m_hasPendingLoad.store(true);
-    } else if (!m_xmlPath.isEmpty()) {
-        std::lock_guard<std::mutex> lk(m_pendingMtx);
-        m_pendingFile = m_xmlPath;
-        m_hasPendingLoad.store(true);
+QString MujocoQuickItem::lastError() const {
+    std::lock_guard<std::mutex> lk(m_errorMtx);
+    return m_lastError;
+}
+
+bool MujocoQuickItem::ensureBackendStarted() {
+    if (m_running.exchange(true)) {
+        return true; // 已启动
     }
 
     // 1) 离屏 surface（QWindow-less 渲染）
@@ -192,24 +194,28 @@ void MujocoQuickItem::start(const QString& filename) {
     m_ctx->setFormat(fmt);
     m_ctx->setShareContext(QOpenGLContext::globalShareContext());
     if (!m_ctx->create()) {
-        qWarning() << "MujocoQuickItem: GL context create failed";
-        return;
+        const QString err = QStringLiteral("GL context create failed");
+        qWarning() << "MujocoQuickItem:" << err;
+        setLastError(err);
+        delete m_ctx; m_ctx = nullptr;
+        if (m_surface) { m_surface->destroy(); delete m_surface; m_surface = nullptr; }
+        m_running.store(false);
+        return false;
     }
 
-    // 推到渲染线程。这里两步走：先从当前（主）线程释放所有权
-    // 到 nullptr（这是 moveToThread 对跨线程交接的唯一合法路径），
-    // 渲染线程启动后再接手 moveToThread(currentThread()).
+    // 推到渲染线程（通过先释放线程亲和性到 nullptr，再由渲染线程接手）
     m_ctx->moveToThread(nullptr);
     m_surface->moveToThread(nullptr);
 
-    // 在 Quick 主线程把当前几何信息推给 adapter（adapter 还未存在时也无所谓）
     updateGeometryToAdapter();
 
     m_renderThread  = std::thread(&MujocoQuickItem::renderThreadMain,  this);
     m_physicsThread = std::thread(&MujocoQuickItem::physicsThreadMain, this);
+
+    return true;
 }
 
-void MujocoQuickItem::stop() {
+void MujocoQuickItem::closeScene() {
     if (!m_running.exchange(false)) return;
 
     if (m_sim) m_sim->exitrequest.store(1);
@@ -233,12 +239,94 @@ void MujocoQuickItem::stop() {
         m_surface = nullptr;
     }
     m_adapterRaw = nullptr;
+
+    // 清理待加载请求和临时文件
+    {
+        std::lock_guard<std::mutex> lk(m_pendingMtx);
+        m_pendingFile.clear();
+    }
+    m_hasPendingLoad.store(false);
+    m_tempSceneFile.reset();
 }
 
-void MujocoQuickItem::loadModel(const QString& filename) {
-    std::lock_guard<std::mutex> lk(m_pendingMtx);
-    m_pendingFile = filename;
+bool MujocoQuickItem::loadScene(const QString& filename) {
+    QFileInfo checkFile(filename);
+    if (filename.isEmpty() || !checkFile.exists() || !checkFile.isFile()) {
+        const QString err = QStringLiteral("Scene file does not exist: %1").arg(filename);
+        qWarning() << "MujocoQuickItem:" << err;
+        setLastError(err);
+        emit sceneLoadFailed(err);
+        return false;
+    }
+
+    if (!ensureBackendStarted()) {
+        emit sceneLoadFailed(lastError());
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(m_pendingMtx);
+        m_pendingFile = filename;
+    }
     m_hasPendingLoad.store(true);
+    return true;
+}
+
+bool MujocoQuickItem::loadSceneFromData(const QByteArray& data, const QString& format) {
+    if (data.isEmpty()) {
+        const QString err = QStringLiteral("Scene data is empty");
+        qWarning() << "MujocoQuickItem:" << err;
+        setLastError(err);
+        emit sceneLoadFailed(err);
+        return false;
+    }
+
+    QString suffix = format.trimmed().toLower();
+    if (suffix.startsWith(QLatin1Char('.'))) suffix.remove(0, 1);
+    if (suffix != QLatin1String("xml") && suffix != QLatin1String("mjb")) {
+        const QString err = QStringLiteral("Unsupported scene format: %1 (expected 'xml' or 'mjb')").arg(format);
+        qWarning() << "MujocoQuickItem:" << err;
+        setLastError(err);
+        emit sceneLoadFailed(err);
+        return false;
+    }
+
+    // 写入临时文件 (保留实例存活，以便 mujoco 异步加载期间文件不会被删除)
+    auto tmp = std::unique_ptr<QTemporaryFile>(new QTemporaryFile(
+        QDir::tempPath() + QStringLiteral("/mujoco_scene_XXXXXX.") + suffix));
+    tmp->setAutoRemove(true);
+    if (!tmp->open()) {
+        const QString err = QStringLiteral("Failed to create temporary scene file: %1").arg(tmp->errorString());
+        qWarning() << "MujocoQuickItem:" << err;
+        setLastError(err);
+        emit sceneLoadFailed(err);
+        return false;
+    }
+    if (tmp->write(data) != data.size()) {
+        const QString err = QStringLiteral("Failed to write scene data to temporary file: %1").arg(tmp->errorString());
+        qWarning() << "MujocoQuickItem:" << err;
+        setLastError(err);
+        emit sceneLoadFailed(err);
+        return false;
+    }
+    tmp->flush();
+    const QString tmpPath = tmp->fileName();
+    tmp->close();
+
+    if (!ensureBackendStarted()) {
+        emit sceneLoadFailed(lastError());
+        return false;
+    }
+
+    // 保活：新临时文件覆盖之前的，物理线程加载完成后旧文件可被回收。
+    m_tempSceneFile = std::move(tmp);
+
+    {
+        std::lock_guard<std::mutex> lk(m_pendingMtx);
+        m_pendingFile = tmpPath;
+    }
+    m_hasPendingLoad.store(true);
+    return true;
 }
 
 void MujocoQuickItem::withSimulation(std::function<void(const mjModel*, mjData*)> callback) const {
@@ -1010,8 +1098,17 @@ void MujocoQuickItem::physicsThreadMain() {
                 if (m) mj_deleteModel(m);
                 m = mnew; d = dnew;
                 mj_forward(m, d);
+                lk.unlock();
+                setLastError(QString());
+                const QString src = file;
+                QMetaObject::invokeMethod(this, [this, src]{ emit sceneLoaded(src); },
+                                          Qt::QueuedConnection);
             } else {
                 sim.LoadMessageClear();
+                const QString reason = QString::fromLocal8Bit(sim.load_error);
+                setLastError(reason);
+                QMetaObject::invokeMethod(this, [this, reason]{ emit sceneLoadFailed(reason); },
+                                          Qt::QueuedConnection);
             }
         }
 
@@ -1027,8 +1124,17 @@ void MujocoQuickItem::physicsThreadMain() {
                 if (m) mj_deleteModel(m);
                 m = mnew; d = dnew;
                 mj_forward(m, d);
+                lk.unlock();
+                setLastError(QString());
+                const QString src = QString::fromLocal8Bit(sim.filename);
+                QMetaObject::invokeMethod(this, [this, src]{ emit sceneLoaded(src); },
+                                          Qt::QueuedConnection);
             } else {
                 sim.LoadMessageClear();
+                const QString reason = QString::fromLocal8Bit(sim.load_error);
+                setLastError(reason);
+                QMetaObject::invokeMethod(this, [this, reason]{ emit sceneLoadFailed(reason); },
+                                          Qt::QueuedConnection);
             }
         }
 
