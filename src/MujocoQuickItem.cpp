@@ -130,6 +130,7 @@ private:
 MujocoQuickItem::MujocoQuickItem(QQuickItem* parent)
     : QQuickFramebufferObject(parent) {
     qRegisterMetaType<JointInfo>();
+    qRegisterMetaType<ContactInfo>();
     setMirrorVertically(true); // mjr 是 OpenGL bottom-up，Quick 绘制时翻一下
     setAcceptedMouseButtons(Qt::AllButtons);
     setAcceptHoverEvents(true);
@@ -518,6 +519,52 @@ bool MujocoQuickItem::saveSceneAsMjb(const QString& filename) {
 static constexpr int kJntQposDim[] = {7, 4, 1, 1}; // free, ball, slide, hinge
 static const char* const kJntTypeName[] = {"free", "ball", "slide", "hinge"};
 
+// ---------------------------------------------------------------------------
+// 接触快照构建：在 sim.mtx 锁内调用，读取当前帧所有接触并转成 ContactInfo 列表。
+// ---------------------------------------------------------------------------
+static QList<ContactInfo> buildContactSnapshot(mjModel* m, mjData* d)
+{
+    QList<ContactInfo> result;
+    if (!m || !d || d->ncon <= 0) return result;
+    result.reserve(d->ncon);
+
+    auto nameOf = [m](int objType, int id) -> QString {
+        if (id < 0) return QString();
+        const char* n = mj_id2name(m, objType, id);
+        return (n && n[0] != '\0') ? QString::fromUtf8(n)
+                                   : QStringLiteral("#%1").arg(id);
+    };
+
+    for (int i = 0; i < d->ncon; ++i) {
+        const mjContact& c = d->contact[i];
+        ContactInfo info;
+        info.geom0Id = c.geom[0];
+        info.geom1Id = c.geom[1];
+        info.body0Id = (c.geom[0] >= 0) ? m->geom_bodyid[c.geom[0]] : -1;
+        info.body1Id = (c.geom[1] >= 0) ? m->geom_bodyid[c.geom[1]] : -1;
+        info.geom0Name = nameOf(mjOBJ_GEOM, c.geom[0]);
+        info.geom1Name = nameOf(mjOBJ_GEOM, c.geom[1]);
+        info.body0Name = nameOf(mjOBJ_BODY, info.body0Id);
+        info.body1Name = nameOf(mjOBJ_BODY, info.body1Id);
+        info.dist        = static_cast<double>(c.dist);
+        info.active      = (c.exclude == 0) && (c.efc_address >= 0);
+        info.penetrating = (c.dist < 0);
+        // 法向接触力（mj_contactForce 返回 6D 质心力，force[0] 为法向分量）
+        mjtNum force[6] = {};
+        mj_contactForce(m, d, i, force);
+        info.normalForce = static_cast<double>(force[0]);
+        info.position = QVector3D(static_cast<float>(c.pos[0]),
+                                  static_cast<float>(c.pos[1]),
+                                  static_cast<float>(c.pos[2]));
+        // 接触帧首行为接触法向（row-major，3x3）
+        info.normal = QVector3D(static_cast<float>(c.frame[0]),
+                                static_cast<float>(c.frame[1]),
+                                static_cast<float>(c.frame[2]));
+        result.append(std::move(info));
+    }
+    return result;
+}
+
 int MujocoQuickItem::jointCount() const
 {
     int count = 0;
@@ -589,6 +636,30 @@ bool MujocoQuickItem::setJointValue(int index, double value)
         applied = true;
     });
     return applied;
+}
+
+// ---------------------------------------------------------------------------
+// 碰撞检测查询
+// ---------------------------------------------------------------------------
+
+int MujocoQuickItem::contactCount() const
+{
+    return m_contactSnapshot.size();
+}
+
+ContactInfo MujocoQuickItem::contact(int index) const
+{
+    if (index < 0 || index >= m_contactSnapshot.size()) return ContactInfo{};
+    return m_contactSnapshot.at(index);
+}
+
+QVariantList MujocoQuickItem::contacts() const
+{
+    QVariantList result;
+    result.reserve(m_contactSnapshot.size());
+    for (const ContactInfo& c : m_contactSnapshot)
+        result.append(QVariant::fromValue(c));
+    return result;
 }
 
 bool MujocoQuickItem::setControlNoise(double scale, double rate) {
@@ -965,11 +1036,22 @@ void MujocoQuickItem::setStatusOverlayVisible(bool visible) {
 void MujocoQuickItem::onFrameRendered() {
     // 在 mujoco 渲染线程被调用，转发到 GUI 线程触发 update()
     const QString statusText = m_sim ? QString::fromUtf8(m_sim->status_overlay_text) : QString();
-    QMetaObject::invokeMethod(this, [this, statusText] {
+
+    // 在锁内采样当前帧接触信息（sim.mtx 是 recursive_mutex，渲染线程可能已持锁）
+    QList<ContactInfo> contacts;
+    if (m_sim) {
+        std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
+        if (m_sim->m_ && m_sim->d_)
+            contacts = buildContactSnapshot(m_sim->m_, m_sim->d_);
+    }
+
+    QMetaObject::invokeMethod(this, [this, statusText, contacts = std::move(contacts)] {
         if (m_statusOverlayText != statusText) {
             m_statusOverlayText = statusText;
             emit statusOverlayTextChanged();
         }
+        m_contactSnapshot = std::move(contacts);
+        emit contactsChanged();
         update();
     }, Qt::QueuedConnection);
 }

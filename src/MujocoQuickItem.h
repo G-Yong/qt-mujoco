@@ -35,7 +35,7 @@ class QOpenGLContext;
 class QOffscreenSurface;
 class QTemporaryFile;
 
-#include "simulationjointinfo.h"
+#include "simulationtypes.h"
 
 namespace mujoco { class Simulate; }
 
@@ -56,6 +56,7 @@ class MujocoQuickItem : public QQuickFramebufferObject, public mjqt::IMujocoHost
     Q_PROPERTY(bool statusOverlayVisible READ statusOverlayVisible WRITE setStatusOverlayVisible NOTIFY statusOverlayVisibleChanged)
     Q_PROPERTY(QString statusOverlayText READ statusOverlayText NOTIFY statusOverlayTextChanged)
     Q_PROPERTY(QString modelTitle READ modelTitle NOTIFY modelTitleChanged)
+    Q_PROPERTY(int contactCount READ contactCount NOTIFY contactsChanged)
 public:
     explicit MujocoQuickItem(QQuickItem *parent = nullptr);
     ~MujocoQuickItem() override;
@@ -152,7 +153,7 @@ public:
     // 返回值：label 合法且模拟已加载时返回 true，否则返回 false（不做任何修改）。
     Q_INVOKABLE bool setLabelVisualization(int label);
     Q_INVOKABLE bool cycleLabelVisualization();
-    
+
     Q_INVOKABLE bool setVisualizationFlag(int flag, bool enabled);
     Q_INVOKABLE bool setRenderingFlag(int flag, bool enabled);
     Q_INVOKABLE bool setGeomGroupVisible(int group, bool visible);
@@ -166,6 +167,17 @@ public:
     Q_INVOKABLE bool setPhysicsDisableFlag(int disableBit, bool disabled);
     Q_INVOKABLE bool setPhysicsEnableFlag(int enableBit, bool enabled);
     Q_INVOKABLE bool setActuatorGroupEnabled(int group, bool enabled);
+
+    // ------------------------------------------------------------------
+    // 碰撞检测查询接口
+    // ------------------------------------------------------------------
+
+    // 返回当前帧快照中的接触数量。每帧在渲染回调中自动更新，线程安全。
+    int contactCount() const;
+    // 返回快照中第 index 个接触的详细信息；越界时返回默认构造值。
+    Q_INVOKABLE ContactInfo  contact(int index) const;
+    // 以 QVariantList 形式返回全部接触快照，供 QML 中遍历使用。
+    Q_INVOKABLE QVariantList contacts() const;
 
     // 线程安全地访问仿真数据（在 sim.mtx 锁内执行 callback）。
     // callback 在物理/渲染线程之外的调用线程中执行，持锁期间
@@ -233,6 +245,8 @@ signals:
     void statusOverlayVisibleChanged();
     void statusOverlayTextChanged();
     void modelTitleChanged();
+    // 每帧在渲染回调后发出，携带最新接触快照（即使接触数量未变也会发出）。
+    void contactsChanged();
 
     // 场景加载结果通知
     void sceneLoaded(const QString& source);
@@ -308,4 +322,8 @@ private:
 
     // loadSceneFromData 写入的临时文件，需保持存活直到下次加载或关闭。
     std::unique_ptr<QTemporaryFile> m_tempSceneFile;
+
+    // 接触快照：由 onFrameRendered() 在主线程更新，contactCount()/contact() 读取。
+    // 仅在主线程访问，无需额外锁。
+    QList<ContactInfo> m_contactSnapshot;
 };

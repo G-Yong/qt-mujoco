@@ -7,92 +7,50 @@
 #include <QQuickWidget>
 #include <QApplication>
 #include <QLabel>
-#include <QTimer>
-
-#include <mujoco/mujoco.h>
-
-#include <algorithm>
 
 namespace {
-QString mujocoObjectName(const mjModel* model, int objectType, int id)
-{
-    if (!model || id < 0) return QStringLiteral("-");
-
-    const char* name = mj_id2name(model, objectType, id);
-    if (name && name[0] != '\0') return QString::fromUtf8(name);
-
-    return QStringLiteral("#%1").arg(id);
-}
-
-QString geomDescription(const mjModel* model, int geomId)
-{
-    if (!model || geomId < 0) return QStringLiteral("flex / none");
-
-    const int bodyId = model->geom_bodyid[geomId];
-    return QStringLiteral("%1 (body %2)")
-        .arg(mujocoObjectName(model, mjOBJ_GEOM, geomId),
-             mujocoObjectName(model, mjOBJ_BODY, bodyId));
-}
-
-QString vec3Text(const mjtNum* value)
+QString vec3Text(const QVector3D& v)
 {
     return QStringLiteral("(%1, %2, %3)")
-        .arg(static_cast<double>(value[0]), 0, 'f', 3)
-        .arg(static_cast<double>(value[1]), 0, 'f', 3)
-        .arg(static_cast<double>(value[2]), 0, 'f', 3);
+        .arg(static_cast<double>(v.x()), 0, 'f', 3)
+        .arg(static_cast<double>(v.y()), 0, 'f', 3)
+        .arg(static_cast<double>(v.z()), 0, 'f', 3);
 }
 
 QString collisionSummary(MujocoQuickItem* mujoco)
 {
     if (!mujoco) return QStringLiteral("未找到 MujocoView");
 
-    QString summary = QStringLiteral("模型尚未加载");
+    const int total = mujoco->contactCount();
+    if (total <= 0)
+        return QStringLiteral("碰撞: 无\ncontacts: 0");
 
-    // withSimulation 会在 sim.mtx 锁内执行回调。这里仅做短时间只读快照，
-    // 读取 d->ncon 和 d->contact[i] 即可判断当前 step 是否检测到接触。
-    mujoco->withSimulation([&summary](const mjModel* model, mjData* data) {
-        if (data->ncon <= 0) {
-            summary = QStringLiteral("碰撞: 无\ncontacts: 0");
-            return;
-        }
+    int activeCount = 0, penetratingCount = 0;
+    for (int i = 0; i < total; ++i) {
+        const ContactInfo c = mujoco->contact(i);
+        if (c.active)      ++activeCount;
+        if (c.penetrating) ++penetratingCount;
+    }
 
-        int activeContacts = 0; // 只有 exclude=0 且 efc_address>=0 的 contact 才会产生约束反作用力，算作 active contact
-        int penetratingContacts = 0; // dist<0 的 contact 是穿透状态，算作 penetrating contact
-        for (int contactIndex = 0; contactIndex < data->ncon; ++contactIndex) {
-            const mjContact& contact = data->contact[contactIndex];
-            if (contact.exclude == 0 && contact.efc_address >= 0) ++activeContacts;
-            if (contact.dist < 0) ++penetratingContacts;
-        }
+    QString summary = QStringLiteral("碰撞/接触: 有\ncontacts: %1  active: %2  penetrating: %3")
+        .arg(total).arg(activeCount).arg(penetratingCount);
 
-        summary = QStringLiteral("碰撞/接触: 有\ncontacts: %1  active: %2  penetrating: %3")
-            .arg(data->ncon)
-            .arg(activeContacts)
-            .arg(penetratingContacts);
-
-        const int shownContacts = std::min(data->ncon, 4);
-        for (int contactIndex = 0; contactIndex < shownContacts; ++contactIndex) {
-            const mjContact& contact = data->contact[contactIndex];
-
-            mjtNum force[6] = {0, 0, 0, 0, 0, 0};
-            mj_contactForce(model, data, contactIndex, force);
-
-            summary += QStringLiteral(
-                "\n#%1 %2 <-> %3"
-                "\n  dist=%4  normalForce=%5  active=%6"
-                "\n  pos=%7")
-                .arg(contactIndex)
-                .arg(geomDescription(model, contact.geom[0]),
-                     geomDescription(model, contact.geom[1]))
-                .arg(static_cast<double>(contact.dist), 0, 'f', 6)
-                .arg(static_cast<double>(force[0]), 0, 'f', 3)
-                .arg(contact.exclude == 0 && contact.efc_address >= 0 ? QStringLiteral("yes") : QStringLiteral("no"))
-                .arg(vec3Text(contact.pos));
-        }
-
-        if (data->ncon > shownContacts) {
-            summary += QStringLiteral("\n... 还有 %1 个 contact").arg(data->ncon - shownContacts);
-        }
-    });
+    const int shown = std::min(total, 4);
+    for (int i = 0; i < shown; ++i) {
+        const ContactInfo c = mujoco->contact(i);
+        summary += QStringLiteral(
+            "\n#%1 %2 (body %3) <-> %4 (body %5)"
+            "\n  dist=%6  normalForce=%7  active=%8"
+            "\n  pos=%9")
+            .arg(i)
+            .arg(c.geom0Name, c.body0Name, c.geom1Name, c.body1Name)
+            .arg(c.dist, 0, 'f', 6)
+            .arg(c.normalForce, 0, 'f', 3)
+            .arg(c.active ? QStringLiteral("yes") : QStringLiteral("no"))
+            .arg(vec3Text(c.position));
+    }
+    if (total > shown)
+        summary += QStringLiteral("\n... 还有 %1 个 contact").arg(total - shown);
 
     return summary;
 }
@@ -168,12 +126,14 @@ int main(int argc, char *argv[])
     label->move(10, 10);
     label->show();
 
-    QTimer *collisionTimer = new QTimer(view);
-    QObject::connect(collisionTimer, &QTimer::timeout, view, [label, mujoco]() {
-        label->setText(collisionSummary(mujoco));
-        label->adjustSize();
-    });
-    collisionTimer->start(200);
+    // contactsChanged 每帧发出，直接驱动标签刷新，无需轮询定时器。
+    if (mujoco) {
+        QObject::connect(mujoco, &MujocoQuickItem::contactsChanged, view, [label, mujoco]() {
+            label->setText(collisionSummary(mujoco));
+            label->adjustSize();
+        });
+    }
 
     return app.exec();
 }
+
