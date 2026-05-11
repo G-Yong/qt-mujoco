@@ -2,6 +2,10 @@
 
 将 MuJoCo 官方 `Simulate` 查看器以 QML 组件的形式嵌入 Qt Quick 应用的集成库。无需 GLFW，直接在 QML 场景中运行完整的 MuJoCo 物理仿真与交互式 3D 渲染。
 
+## 效果
+
+![snapshot](assets/snapshot.png)
+
 ## 特性
 
 - **零 GLFW 依赖**：用 `QtPlatformUIAdapter` 替换官方 `GlfwAdapter`，所有 OpenGL 上下文、事件均由 Qt 管理。
@@ -123,10 +127,6 @@ mujocoViewItem->loadModel("new_model.xml");
 ```
 
 **QML 拖拽加载**：demo 中的 `DropArea` 示例可直接复用，将 `.xml` / `.mjb` 拖入窗口即可切换。
-
-## 效果
-
-![snapshot](assets/snapshot.png)
 
 ## 模型库
 
