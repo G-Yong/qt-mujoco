@@ -1,8 +1,8 @@
 HEADERS += \
+    $$PWD/IMujocoHost.h \
     $$PWD/QtPlatformUIAdapter.h \
     $$PWD/MujocoQuickItem.h \
     $$PWD/simulationtypes.h \
-    $$PWD/simulationjointinfo.h \
     $$PWD/lodepng.h
 
 SOURCES += \

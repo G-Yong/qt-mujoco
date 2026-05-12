@@ -844,7 +844,7 @@ bool MujocoQuickItem::setRenderingFlag(int flag, bool enabled) {
     return applied;
 }
 
-bool MujocoQuickItem::setVisualGroupVisible(mjtByte* groups, int group, bool visible) {
+bool MujocoQuickItem::setVisualGroupVisible(unsigned char* groups, int group, bool visible) {
     if (!groups || !isValidIndex(group, mjNGROUP)) return false;
     groups[group] = visible;
     return true;

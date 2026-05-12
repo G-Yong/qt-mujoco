@@ -43,6 +43,10 @@ Qt 主线程
 | `MujocoFboRenderer` | scenegraph 渲染线程端：把共享纹理 blit 到 Quick 提供的 FBO |
 | `QtPlatformUIAdapter` | 实现 `mujoco::PlatformUIAdapter`：offscreen FBO 管理、共享纹理创建、帧节拍 CV、事件队列 |
 
+`MujocoQuickItem.h` 是可交付给外部客户的公共头文件。它只包含 Qt / C++ 标准库头和 `simulationtypes.h`，不包含 MuJoCo 或 `simulate` 目录下的头文件；需要 `mjModel` / `mjData` 的高级回调接口仅在头文件中前向声明类型。真正依赖 MuJoCo 的 `QtPlatformUIAdapter.h`、`simulate.h`、`mujoco.h` 只在实现文件或内部适配器头中使用。
+
+在 `RobotSimulator` 动态库中集成时，构建系统通过 `MUJOCOQUICKITEM_EXPORT=Q_DECL_EXPORT` 导出 `MujocoQuickItem`。交付头 `simulationview.h` 会在包含 `MujocoQuickItem.h` 前将 `MUJOCOQUICKITEM_EXPORT` 映射为 `ROBOTSIMULATOR_EXPORT`，因此客户仍可使用兼容的 `RobotSim::SimulationView` 类型名；该类型名现在是 `MujocoQuickItem` 的别名，不再维护一层重复转发封装。
+
 ### 关键设计说明
 
 | 问题 | 解决方案 |
@@ -123,8 +127,22 @@ MujocoView {
 **C++ 热切换模型**（线程安全）：
 
 ```cpp
-mujocoViewItem->loadModel("new_model.xml");
+mujocoViewItem->loadScene("new_model.xml");
 ```
+
+**通过 RobotSimulator 交付库使用**：
+
+```cpp
+#include "robotSimulator.h"
+
+RobotSim::SimulationController controller;
+RobotSim::SimulationView *view = controller.simulationView();
+
+view->setSimulationRunning(false);
+view->loadScene("robot.mjb");
+```
+
+`RobotSim::SimulationView` 只是兼容旧代码的类型别名，所有属性、信号和 `Q_INVOKABLE` 方法都来自 `MujocoQuickItem` 本体。`SimulationController` 创建的视图默认关闭左右 MuJoCo 内置 UI；直接实例化 `MujocoQuickItem` 时仍保留 qt-mujoco demo 的默认 UI 行为。
 
 **QML 拖拽加载**：demo 中的 `DropArea` 示例可直接复用，将 `.xml` / `.mjb` 拖入窗口即可切换。
 
@@ -145,96 +163,7 @@ MuJoCo 官方提供了丰富的示例模型，可在 [MuJoCo 模型库](https://
 为此给 `Simulate` 添加了 `status_overlay` 开关与 `status_overlay_text` 只读缓冲，
 再通过 `MujocoQuickItem::statusOverlayVisible` / `statusOverlayText` 属性暴露给 QML。
 
-### 补丁（patch 格式，可直接 `git apply`）
-
-```diff
-diff --git a/mujoco-3.8.0-windows-x86_64/simulate/simulate.h b/mujoco-3.8.0-windows-x86_64/simulate/simulate.h
---- a/mujoco-3.8.0-windows-x86_64/simulate/simulate.h
-+++ b/mujoco-3.8.0-windows-x86_64/simulate/simulate.h
-@@ -192,6 +192,7 @@ class Simulate {
-   int profiler = 0;
-   int sensor = 0;
-   int pause_update = 0;
-+  int status_overlay = 1;       // qt-mujoco patch: 0=hide centre overlay
-   int fullscreen = 0;
-   int vsync = 1;
-   int busywait = 0;
-@@ -223,6 +224,7 @@ class Simulate {
- 
-   // strings
-   char load_error[kMaxFilenameLength] = "";
-+  char status_overlay_text[30] = "";   // qt-mujoco patch: current overlay label
-   char dropfilename[kMaxFilenameLength] = "";
-   char filename[kMaxFilenameLength] = "";
-   char previous_filename[kMaxFilenameLength] = "";
-
-diff --git a/mujoco-3.8.0-windows-x86_64/simulate/simulate.cc b/mujoco-3.8.0-windows-x86_64/simulate/simulate.cc
---- a/mujoco-3.8.0-windows-x86_64/simulate/simulate.cc
-+++ b/mujoco-3.8.0-windows-x86_64/simulate/simulate.cc
-@@ -96,6 +96,20 @@ inline void Copy(T& dst, const T& src) {
- 
- const double zoom_increment = 0.02;  // ratio of one click-wheel zoom increment to vertical extent
- 
-+// qt-mujoco patch: compute current centre-overlay label and cache it in
-+// sim->status_overlay_text so the Qt wrapper can read it without touching
-+// the render path.
-+void UpdateStatusOverlayText(mj::Simulate* sim) {
-+  char label[30] = {'\0'};
-+  if (sim->loadrequest) {
-+    std::snprintf(label, sizeof(label), "LOADING...");
-+  } else if (!sim->run) {
-+    if (sim->scrub_index == 0) {
-+      std::snprintf(label, sizeof(label), "PAUSE");
-+    } else {
-+      std::snprintf(label, sizeof(label), "PAUSE (%d)", sim->scrub_index);
-+    }
-+  }
-+  mju::strcpy_arr(sim->status_overlay_text, label);
-+}
-+
- // section ids
- enum {
-   // left ui
-@@ -2617,6 +2631,7 @@ void Simulate::Render() {
-   if (this->profiler) {
-     smallrect.width = rect.width - rect.width/4;
-   }
-+  UpdateStatusOverlayText(this);   // qt-mujoco patch
- 
-   // no model
-   if (!this->is_passive_ && !this->m_) {
-@@ -2625,8 +2640,10 @@ void Simulate::Render() {
- 
-     // label
-     if (this->loadrequest) {
--      mjr_overlay(mjFONT_BIG, mjGRID_TOP, smallrect, "LOADING...", nullptr,
--                  &this->platform_ui->mjr_context());
-+      if (this->status_overlay) {                          // qt-mujoco patch
-+        mjr_overlay(mjFONT_BIG, mjGRID_TOP, smallrect, this->status_overlay_text, nullptr,
-+                    &this->platform_ui->mjr_context());
-+      }
-     } else {
-       char intro_message[Simulate::kMaxFilenameLength];
-       mju::sprintf_arr(intro_message,
-@@ -2754,16 +2771,8 @@ void Simulate::Render() {
-   }
- 
-   // show pause/loading label
--  if (!this->run || this->loadrequest) {
--    char label[30] = {'\0'};
--    if (this->loadrequest) {
--      std::snprintf(label, sizeof(label), "LOADING...");
--    } else if (this->scrub_index == 0) {
--      std::snprintf(label, sizeof(label), "PAUSE");
--    } else {
--      std::snprintf(label, sizeof(label), "PAUSE (%d)", this->scrub_index);
--    }
--    mjr_overlay(mjFONT_BIG, mjGRID_TOP, smallrect, label, nullptr,
-+  if (this->status_overlay && this->status_overlay_text[0]) {   // qt-mujoco patch
-+    mjr_overlay(mjFONT_BIG, mjGRID_TOP, smallrect, this->status_overlay_text, nullptr,
-                 &this->platform_ui->mjr_context());
-   }
-```
+[补丁请查看 `patches/status-overlay.patch`](patches/status-overlay.patch)，共 4 处改动，均有 `// qt-mujoco patch` 注释标明。
 
 ### 升级步骤
 

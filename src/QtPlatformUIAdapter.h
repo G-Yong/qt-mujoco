@@ -27,20 +27,10 @@
 
 #include <QString>
 
+#include "IMujocoHost.h"
 #include "platform_ui_adapter.h"
 
 namespace mjqt {
-
-// 宿主接口：MujocoQuickItem 实现该接口，供适配器回调
-class IMujocoHost {
-public:
-    virtual ~IMujocoHost() = default;
-    // 渲染线程：每帧 mjr 渲染完成后调用，宿主据此触发 Quick scenegraph 重绘
-    virtual void onFrameRendered() = 0;
-    // Qt 主线程相关：仅做转发，宿主自行 invokeMethod
-    virtual void onSetTitle(const QString& title) = 0;
-    virtual void onToggleFullscreen() = 0;
-};
 
 class QtPlatformUIAdapter : public mujoco::PlatformUIAdapter {
 public:

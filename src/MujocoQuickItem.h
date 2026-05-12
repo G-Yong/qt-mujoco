@@ -15,7 +15,7 @@
 //             └─ glBlitFramebuffer 把共享纹理拷贝到 Quick 提供的 FBO
 //
 // 使用：
-//   - QML: import 后实例化 MujocoView，通过 xmlPath 或 loadModel 加载模型
+//   - QML: import 后实例化 MujocoView，通过 xmlPath 或 loadScene 加载模型
 //   - C++: 也可作为 QQuickItem 嵌入；Widget 工程通过 QQuickWidget 集成
 // ---------------------------------------------------------------------------
 
@@ -23,23 +23,33 @@
 #include <QString>
 #include <QSize>
 #include <QVariant>
+#include <QtCore/qglobal.h>
 #include <atomic>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <thread>
 
-#include "QtPlatformUIAdapter.h"
+#include "IMujocoHost.h"
+#include "simulationtypes.h"
 
 class QOpenGLContext;
 class QOffscreenSurface;
 class QTemporaryFile;
 
-#include "simulationtypes.h"
+struct mjModel_;
+typedef mjModel_ mjModel;
+struct mjData_;
+typedef mjData_ mjData;
 
 namespace mujoco { class Simulate; }
+namespace mjqt { class QtPlatformUIAdapter; }
 
-class MujocoQuickItem : public QQuickFramebufferObject, public mjqt::IMujocoHost {
+#ifndef MUJOCOQUICKITEM_EXPORT
+#  define MUJOCOQUICKITEM_EXPORT
+#endif
+
+class MUJOCOQUICKITEM_EXPORT MujocoQuickItem : public QQuickFramebufferObject, public mjqt::IMujocoHost {
     Q_OBJECT
     Q_PROPERTY(QString xmlPath READ xmlPath WRITE setXmlPath NOTIFY xmlPathChanged)
     Q_PROPERTY(bool simulationRunning READ simulationRunning WRITE setSimulationRunning NOTIFY simulationRunningChanged)
@@ -274,7 +284,7 @@ private:
     void requestRenderUpdate();
     void applyBooleanPropertiesTo(mujoco::Simulate& sim);
     bool withSimulateLocked(const std::function<void(mujoco::Simulate&)>& callback);
-    bool setVisualGroupVisible(mjtByte* groups, int group, bool visible);
+    bool setVisualGroupVisible(unsigned char* groups, int group, bool visible);
     int  qtMouseButtonToInternal(int btn) const;
     int  qtKeyToMjui(int key) const;
     void updateModifiersFrom(int qtMods);
