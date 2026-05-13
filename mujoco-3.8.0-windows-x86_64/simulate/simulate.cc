@@ -2307,6 +2307,33 @@ void Simulate::Sync(bool state_only) {
   // update scene or sync data from user in passive mode
   if (!is_passive_) {
     mjv_updateScene(m_, d_, &this->opt, &this->pert, &this->cam, mjCAT_ALL, &this->scn);
+
+    // append user_scn geoms (managed mode) so that visual-only primitives
+    // injected via Simulate::user_scn are rendered.
+    if (user_scn) {
+      int nusergeom = user_scn->ngeom;
+      int ngeom = std::min(nusergeom, this->scn.maxgeom - this->scn.ngeom);
+      if (ngeom < nusergeom && !this->scn.status) {
+        mju_warning("Pre-allocated visual geom buffer is full. "
+                    "Increase maxgeom above %d.", this->scn.maxgeom);
+        this->scn.status = 1;
+      }
+      if (ngeom > 0) {
+        std::memcpy(this->scn.geoms + this->scn.ngeom, user_scn->geoms,
+                    ngeom * sizeof(mjvGeom));
+        this->scn.ngeom += ngeom;
+      }
+
+      // pick up rendering flags changed via user_scn
+      for (int i = 0; i < mjNRNDFLAG; ++i) {
+        if (user_scn->flags[i] != user_scn_flags_prev_[i]) {
+          scn.flags[i] = user_scn->flags[i];
+          pending_.ui_update_rendering = true;
+        }
+      }
+      Copy(user_scn->flags, scn.flags);
+      Copy(user_scn_flags_prev_, user_scn->flags);
+    }
   } else {
     if (state_only) {
       int state_size = mj_stateSize(m_, mjSTATE_INTEGRATION);

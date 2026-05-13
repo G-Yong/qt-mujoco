@@ -2,6 +2,7 @@ HEADERS += \
     $$PWD/IMujocoHost.h \
     $$PWD/QtPlatformUIAdapter.h \
     $$PWD/MujocoQuickItem.h \
+    $$PWD/MujocoQuickItemHelpers.h \
     $$PWD/simulationtypes.h \
     $$PWD/lodepng.h
 

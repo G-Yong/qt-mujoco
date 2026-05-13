@@ -1,4 +1,5 @@
 #include "MujocoQuickItem.h"
+#include "MujocoQuickItemHelpers.h"
 #include "QtPlatformUIAdapter.h"
 
 #include "simulate.h"
@@ -28,27 +29,18 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 namespace {
 constexpr double  syncMisalign       = 0.1;
 constexpr double  simRefreshFraction = 0.7;
 constexpr int     kErrorLength       = 1024;
 using Seconds = std::chrono::duration<double>;
-
-int boolToInt(bool value) { return value ? 1 : 0; }
-
-bool isValidIndex(int index, int count) {
-    return index >= 0 && index < count;
-}
-
-int bitFlagIndex(int bit, int count) {
-    if (bit <= 0) return -1;
-    for (int i = 0; i < count; ++i) {
-        if (bit == (1 << i)) return i;
-    }
-    return -1;
-}
 } // namespace
+
+// 把辅助函数 / 结构暴露给本翻译单元（包括下面的 static 自由函数与
+// MujocoQuickItem 成员函数实现）。
+using namespace mqi_detail;
 
 // ===========================================================================
 // MujocoFboRenderer：Qt Quick scenegraph 渲染线程
@@ -130,6 +122,7 @@ private:
 MujocoQuickItem::MujocoQuickItem(QQuickItem* parent)
     : QQuickFramebufferObject(parent) {
     qRegisterMetaType<JointInfo>();
+    qRegisterMetaType<SceneObjectInfo>();
     qRegisterMetaType<ContactInfo>();
     setMirrorVertically(true); // mjr 是 OpenGL bottom-up，Quick 绘制时翻一下
     setAcceptedMouseButtons(Qt::AllButtons);
@@ -225,6 +218,12 @@ void MujocoQuickItem::closeScene() {
 
     if (m_physicsThread.joinable()) m_physicsThread.join();
     if (m_renderThread.joinable())  m_renderThread.join();
+
+    if (m_userScene) {
+        mjv_freeScene(m_userScene);
+        delete m_userScene;
+        m_userScene = nullptr;
+    }
 
     m_sim.reset();
     // 渲染线程退出前已把 m_ctx / m_surface 的线程亲和性释放为 nullptr，
@@ -390,6 +389,20 @@ bool MujocoQuickItem::withSimulateLocked(const std::function<void(mujoco::Simula
     return true;
 }
 
+bool MujocoQuickItem::ensureUserSceneLocked(mujoco::Simulate& sim) {
+    if (!m_userScene) {
+        m_userScene = new mjvScene;
+        mjv_defaultScene(m_userScene);
+        mjv_makeScene(nullptr, m_userScene, mujoco::Simulate::kMaxGeom);
+    }
+    if (!m_userScene->geoms || m_userScene->maxgeom <= 0) {
+        setLastError(QStringLiteral("Failed to create MuJoCo user scene"));
+        return false;
+    }
+    sim.user_scn = m_userScene;
+    return true;
+}
+
 void MujocoQuickItem::setSimulationRunning(bool running) {
     if (m_simulationRunning.exchange(running) == running) return;
     withSimulateLocked([&](mujoco::Simulate& sim) {
@@ -512,12 +525,594 @@ bool MujocoQuickItem::saveSceneAsMjb(const QString& filename) {
     return applied;
 }
 
+bool MujocoQuickItem::addPrimitive(PrimitiveType type,
+                                   const QVector3D& position,
+                                   const QVector3D& size,
+                                   double mass,
+                                   bool freeJoint,
+                                   const QString& name) {
+    const int geomType = primitiveGeomType(type);
+    if (geomType == mjGEOM_NONE) {
+        setLastError(QStringLiteral("Unsupported primitive type: %1").arg(primitiveTypeName(type)));
+        return false;
+    }
+
+    if (!m_sim) {
+        setLastError(QStringLiteral("Scene is not loaded"));
+        return false;
+    }
+
+    mjModel* modelForReload = nullptr;
+    mjData* dataForReload = nullptr;
+    QByteArray displayedFilename;
+
+    {
+        std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
+        if (!m_sim->m_ || !m_sim->d_) {
+            setLastError(QStringLiteral("Scene is not loaded"));
+            return false;
+        }
+        if (!m_editSpec) {
+            setLastError(QStringLiteral("Current scene is not editable; load an XML scene before adding primitives"));
+            return false;
+        }
+
+        mjSpec* spec = mj_copySpec(m_editSpec);
+        if (!spec) {
+            setLastError(QStringLiteral("Failed to copy MuJoCo spec"));
+            return false;
+        }
+
+        if (!mj_copyBack(spec, m_sim->m_)) {
+            mj_deleteSpec(spec);
+            setLastError(QStringLiteral("Failed to copy current model values back to MuJoCo spec"));
+            return false;
+        }
+
+        mjsBody* world = mjs_findBody(spec, "world");
+        if (!world) {
+            mj_deleteSpec(spec);
+            setLastError(QStringLiteral("Failed to find MuJoCo world body in spec"));
+            return false;
+        }
+
+        mjsBody* body = mjs_addBody(world, nullptr);
+        mjsGeom* geom = body ? mjs_addGeom(body, nullptr) : nullptr;
+        if (!body || !geom) {
+            mj_deleteSpec(spec);
+            setLastError(QStringLiteral("Failed to add primitive body or geom"));
+            return false;
+        }
+
+        QString baseName = name.trimmed();
+        if (baseName.isEmpty()) baseName = QStringLiteral("primitive_%1").arg(m_sim->m_->nbody);
+        QString bodyName = baseName;
+        int suffix = 1;
+        while (mj_name2id(m_sim->m_, mjOBJ_BODY, bodyName.toUtf8().constData()) >= 0) {
+            bodyName = QStringLiteral("%1_%2").arg(baseName).arg(suffix++);
+        }
+        const QString geomName = bodyName + QStringLiteral("_geom");
+
+        const QByteArray bodyNameUtf8 = bodyName.toUtf8();
+        const QByteArray geomNameUtf8 = geomName.toUtf8();
+        mjs_setName(body->element, bodyNameUtf8.constData());
+        mjs_setName(geom->element, geomNameUtf8.constData());
+
+        copyVec3(body->pos, position);
+        geom->type = static_cast<mjtGeom>(geomType);
+        setPrimitiveSize(geom, geomType, size);
+        if (mass > 0.0) geom->mass = mass;
+        geom->rgba[0] = 0.2f;
+        geom->rgba[1] = 0.6f;
+        geom->rgba[2] = 0.9f;
+        geom->rgba[3] = 1.0f;
+
+        if (freeJoint && !mjs_addFreeJoint(body)) {
+            mj_deleteSpec(spec);
+            setLastError(QStringLiteral("Failed to add free joint to primitive body"));
+            return false;
+        }
+
+        const int rc = mj_recompile(spec, nullptr, m_sim->m_, m_sim->d_);
+        if (rc != 0) {
+            const char* err = mjs_getError(spec);
+            const QString reason = err && err[0]
+                ? QString::fromUtf8(err)
+                : QStringLiteral("Failed to recompile MuJoCo model after adding primitive");
+            mj_deleteSpec(spec);
+            setLastError(reason);
+            return false;
+        }
+
+        mj_deleteSpec(m_editSpec);
+        m_editSpec = spec;
+        // mj_recompile 之后 sim.qpos_ / qpos_prev_ 仍然保持旧 nq 大小，
+        // 必须立刻 resize 到新 nq 并从 d->qpos 同步：否则 Simulate::Sync()
+        // 在 [old_nq, new_nq) 范围会读到越界内存（可能为 0），并把它写回
+        // d->qpos，从而把刚加入的 free-joint body 的位置 "清零" 到原点。
+        resyncSimulateQposCaches(*m_sim);
+        const int addedBodyId = mj_name2id(m_sim->m_, mjOBJ_BODY, bodyNameUtf8.constData());
+        const int freeJointId = freeJointIndexForBody(m_sim->m_, addedBodyId);
+        if (freeJointId >= 0) {
+            setFreeJointPosition(m_sim->m_, m_sim->d_,
+                                 m_sim->qpos_, m_sim->qpos_prev_,
+                                 freeJointId, position);
+        }
+        mj_forward(m_sim->m_, m_sim->d_);
+        markUiRefresh(*m_sim);
+        modelForReload = m_sim->m_;
+        dataForReload = m_sim->d_;
+        displayedFilename = QByteArray(m_sim->filename);
+    }
+
+    if (modelForReload && dataForReload) {
+        m_sim->Load(modelForReload, dataForReload, displayedFilename.constData());
+    }
+    setLastError(QString());
+    requestRenderUpdate();
+    return true;
+}
+
+int MujocoQuickItem::addVisualPrimitive(PrimitiveType type,
+                                        const QVector3D& position,
+                                        const QVector3D& size,
+                                        const QVector4D& rgba) {
+    const int geomType = primitiveGeomType(type);
+    if (geomType == mjGEOM_NONE) {
+        setLastError(QStringLiteral("Unsupported primitive type: %1").arg(primitiveTypeName(type)));
+        return -1;
+    }
+
+    if (!m_sim) {
+        setLastError(QStringLiteral("Scene is not loaded"));
+        return -1;
+    }
+
+    int addedIndex = -1;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!ensureUserSceneLocked(sim)) return;
+        if (m_userScene->ngeom >= m_userScene->maxgeom) {
+            setLastError(QStringLiteral("MuJoCo user scene geom buffer is full"));
+            return;
+        }
+
+        mjtNum geomSize[3] = {};
+        mjtNum geomPos[3] = {};
+        const mjtNum identity[9] = {
+            1.0, 0.0, 0.0,
+            0.0, 1.0, 0.0,
+            0.0, 0.0, 1.0
+        };
+        const float color[4] = {rgba.x(), rgba.y(), rgba.z(), rgba.w()};
+        fillPrimitiveSize(geomSize, geomType, size);
+        copyVec3(geomPos, position);
+
+        addedIndex = m_userScene->ngeom++;
+        mjv_initGeom(m_userScene->geoms + addedIndex,
+                     geomType, geomSize, geomPos, identity, color);
+        markUiRefresh(sim);
+        setLastError(QString());
+    });
+    return addedIndex;
+}
+
+QVariantList MujocoQuickItem::addVisualPrimitives(const QVariantList& positions,
+                                                  const QVariantList& types,
+                                                  const QVariantList& sizes,
+                                                  const QVariantList& rgba) {
+    std::vector<PrimitiveRequest> requests;
+    QString error;
+    if (!buildPrimitiveRequests(positions, types, sizes, rgba,
+                                QVector4D(0.2f, 0.6f, 0.9f, 1.0f),
+                                QString(), &requests, &error)) {
+        setLastError(error);
+        return {};
+    }
+    if (requests.empty()) {
+        setLastError(QString());
+        return {};
+    }
+
+    if (!m_sim) {
+        setLastError(QStringLiteral("Scene is not loaded"));
+        return {};
+    }
+
+    QVariantList addedIndices;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!ensureUserSceneLocked(sim)) return;
+        if (requests.size() > static_cast<size_t>(m_userScene->maxgeom - m_userScene->ngeom)) {
+            setLastError(QStringLiteral("MuJoCo user scene geom buffer is full"));
+            return;
+        }
+
+        const mjtNum identity[9] = {
+            1.0, 0.0, 0.0,
+            0.0, 1.0, 0.0,
+            0.0, 0.0, 1.0
+        };
+        for (const PrimitiveRequest& request : requests) {
+            mjtNum geomSize[3] = {};
+            mjtNum geomPos[3] = {};
+            const float color[4] = {request.rgba.x(), request.rgba.y(), request.rgba.z(), request.rgba.w()};
+            fillPrimitiveSize(geomSize, request.geomType, request.size);
+            copyVec3(geomPos, request.position);
+
+            const int addedIndex = m_userScene->ngeom++;
+            mjv_initGeom(m_userScene->geoms + addedIndex,
+                         request.geomType, geomSize, geomPos, identity, color);
+            addedIndices.append(addedIndex);
+        }
+        markUiRefresh(sim);
+        setLastError(QString());
+    });
+    return addedIndices;
+}
+
+int MujocoQuickItem::visualPrimitiveCount() const
+{
+    int count = 0;
+    if (!m_sim) return count;
+    std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
+    if (m_userScene) count = m_userScene->ngeom;
+    return count;
+}
+
+bool MujocoQuickItem::setVisualPrimitivePosition(int index, const QVector3D& position)
+{
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!m_userScene || index < 0 || index >= m_userScene->ngeom) return;
+        copyVec3(m_userScene->geoms[index].pos, position);
+        markUiRefresh(sim);
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::setVisualPrimitiveSize(int index, const QVector3D& size)
+{
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!m_userScene || index < 0 || index >= m_userScene->ngeom) return;
+        fillPrimitiveSize(m_userScene->geoms[index].size,
+                          m_userScene->geoms[index].type,
+                          size);
+        markUiRefresh(sim);
+        applied = true;
+    });
+    return applied;
+}
+
+void MujocoQuickItem::clearVisualPrimitives()
+{
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!m_userScene) return;
+        m_userScene->ngeom = 0;
+        markUiRefresh(sim);
+        setLastError(QString());
+    });
+}
+
+int MujocoQuickItem::addStaticObstacle(PrimitiveType type,
+                                       const QVector3D& position,
+                                       const QVector3D& size,
+                                       const QVector4D& rgba,
+                                       int contype,
+                                       int conaffinity,
+                                       const QString& name)
+{
+    QVariantList positions;
+    QVariantList sizes;
+    QVariantList colors;
+    QVariantList types;
+    positions.append(QVariant::fromValue(position));
+    sizes.append(QVariant::fromValue(size));
+    colors.append(QVariant::fromValue(rgba));
+    types.append(static_cast<int>(type));
+
+    const QVariantList bodyIds = addStaticObstacleRequests(positions, types, sizes, colors,
+                                                           contype, conaffinity, name, true);
+    return bodyIds.isEmpty() ? -1 : bodyIds.first().toInt();
+}
+
+QVariantList MujocoQuickItem::addStaticObstacles(const QVariantList& positions,
+                                                 const QVariantList& types,
+                                                 const QVariantList& sizes,
+                                                 const QVariantList& rgba,
+                                                 int contype,
+                                                 int conaffinity,
+                                                 const QString& namePrefix)
+{
+    return addStaticObstacleRequests(positions, types, sizes, rgba,
+                                     contype, conaffinity, namePrefix, false);
+}
+
+QVariantList MujocoQuickItem::addStaticObstacleRequests(const QVariantList& positions,
+                                                       const QVariantList& types,
+                                                       const QVariantList& sizes,
+                                                       const QVariantList& rgba,
+                                                       int contype,
+                                                       int conaffinity,
+                                                       const QString& namePrefix,
+                                                       bool useExactSingleName)
+{
+    std::vector<PrimitiveRequest> requests;
+    QString error;
+    const QString effectivePrefix = namePrefix.trimmed().isEmpty() ? QStringLiteral("obstacle") : namePrefix.trimmed();
+    if (!buildPrimitiveRequests(positions, types, sizes, rgba,
+                                QVector4D(0.9f, 0.25f, 0.15f, 0.8f),
+                                effectivePrefix, &requests, &error)) {
+        setLastError(error);
+        return {};
+    }
+    if (useExactSingleName && requests.size() == 1) {
+        requests[0].name = namePrefix.trimmed();
+    }
+    if (requests.empty()) {
+        setLastError(QString());
+        return {};
+    }
+
+    if (!m_sim) {
+        setLastError(QStringLiteral("Scene is not loaded"));
+        return {};
+    }
+
+    mjModel* modelForReload = nullptr;
+    mjData* dataForReload = nullptr;
+    QByteArray displayedFilename;
+    std::vector<QString> addedBodyNames;
+    QVariantList bodyIds;
+
+    {
+        std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
+        if (!m_sim->m_ || !m_sim->d_) {
+            setLastError(QStringLiteral("Scene is not loaded"));
+            return {};
+        }
+        if (!m_editSpec) {
+            setLastError(QStringLiteral("Current scene is not editable; load an XML scene before adding obstacles"));
+            return {};
+        }
+
+        mjSpec* spec = mj_copySpec(m_editSpec);
+        if (!spec) {
+            setLastError(QStringLiteral("Failed to copy MuJoCo spec"));
+            return {};
+        }
+
+        if (!mj_copyBack(spec, m_sim->m_)) {
+            mj_deleteSpec(spec);
+            setLastError(QStringLiteral("Failed to copy current model values back to MuJoCo spec"));
+            return {};
+        }
+
+        mjsBody* world = mjs_findBody(spec, "world");
+        if (!world) {
+            mj_deleteSpec(spec);
+            setLastError(QStringLiteral("Failed to find MuJoCo world body in spec"));
+            return {};
+        }
+
+        addedBodyNames.reserve(requests.size());
+        for (size_t i = 0; i < requests.size(); ++i) {
+            const PrimitiveRequest& request = requests[i];
+            const QString baseName = request.name.trimmed().isEmpty()
+                ? QStringLiteral("obstacle_%1").arg(m_sim->m_->nbody + static_cast<int>(i))
+                : request.name;
+            const QString bodyName = uniqueObjectName(m_sim->m_, addedBodyNames, mjOBJ_BODY, baseName);
+            const QString geomName = uniqueObjectName(m_sim->m_, {}, mjOBJ_GEOM, bodyName + QStringLiteral("_geom"));
+
+            mjsBody* body = mjs_addBody(world, nullptr);
+            mjsGeom* geom = body ? mjs_addGeom(body, nullptr) : nullptr;
+            if (!body || !geom) {
+                mj_deleteSpec(spec);
+                setLastError(QStringLiteral("Failed to add obstacle body or geom"));
+                return {};
+            }
+
+            const QByteArray bodyNameUtf8 = bodyName.toUtf8();
+            const QByteArray geomNameUtf8 = geomName.toUtf8();
+            mjs_setName(body->element, bodyNameUtf8.constData());
+            mjs_setName(geom->element, geomNameUtf8.constData());
+            copyVec3(body->pos, request.position);
+            geom->type = static_cast<mjtGeom>(request.geomType);
+            setPrimitiveSize(geom, request.geomType, request.size);
+            geom->mass = 0.0;
+            geom->contype = contype;
+            geom->conaffinity = conaffinity;
+            geom->rgba[0] = request.rgba.x();
+            geom->rgba[1] = request.rgba.y();
+            geom->rgba[2] = request.rgba.z();
+            geom->rgba[3] = request.rgba.w();
+            addedBodyNames.push_back(bodyName);
+        }
+
+        const int rc = mj_recompile(spec, nullptr, m_sim->m_, m_sim->d_);
+        if (rc != 0) {
+            const char* err = mjs_getError(spec);
+            const QString reason = err && err[0]
+                ? QString::fromUtf8(err)
+                : QStringLiteral("Failed to recompile MuJoCo model after adding obstacles");
+            mj_deleteSpec(spec);
+            setLastError(reason);
+            return {};
+        }
+
+        mj_deleteSpec(m_editSpec);
+        m_editSpec = spec;
+        for (const QString& bodyName : addedBodyNames) {
+            bodyIds.append(mj_name2id(m_sim->m_, mjOBJ_BODY, bodyName.toUtf8().constData()));
+        }
+        mj_forward(m_sim->m_, m_sim->d_);
+        markUiRefresh(*m_sim);
+        modelForReload = m_sim->m_;
+        dataForReload = m_sim->d_;
+        displayedFilename = QByteArray(m_sim->filename);
+    }
+
+    if (modelForReload && dataForReload) {
+        m_sim->Load(modelForReload, dataForReload, displayedFilename.constData());
+    }
+    setLastError(QString());
+    requestRenderUpdate();
+    return bodyIds;
+}
+
 // ---------------------------------------------------------------------------
 // 关节查询与控制
 // ---------------------------------------------------------------------------
 
 static constexpr int kJntQposDim[] = {7, 4, 1, 1}; // free, ball, slide, hinge
 static const char* const kJntTypeName[] = {"free", "ball", "slide", "hinge"};
+
+static SceneObjectInfo buildSceneObjectInfo(const mjModel* model, const mjData* data, int bodyId)
+{
+    SceneObjectInfo info;
+    if (!model || !data || bodyId <= 0 || bodyId >= model->nbody) return info;
+
+    info.bodyId = bodyId;
+    info.name = objectName(model, mjOBJ_BODY, bodyId);
+    info.parentBodyId = model->body_parentid[bodyId];
+    info.parentName = objectName(model, mjOBJ_BODY, info.parentBodyId);
+    info.position = vectorFrom3(data->xpos + 3 * bodyId);
+    info.localPosition = vectorFrom3(model->body_pos + 3 * bodyId);
+    info.mass = static_cast<double>(model->body_mass[bodyId]);
+    info.jointCount = model->body_jntnum[bodyId];
+    info.geomCount = model->body_geomnum[bodyId];
+    info.movable = model->body_dofnum[bodyId] > 0;
+
+    if (info.geomCount > 0) {
+        const int geomId = model->body_geomadr[bodyId];
+        info.firstGeomId = geomId;
+        info.firstGeomName = objectName(model, mjOBJ_GEOM, geomId);
+        info.firstGeomType = model->geom_type[geomId];
+        info.firstGeomTypeName = geomTypeName(info.firstGeomType);
+        info.firstGeomSize = vectorFrom3(model->geom_size + 3 * geomId);
+    }
+    return info;
+}
+
+static bool setBodyGeomSize(mjModel* model, int bodyId, const QVector3D& size)
+{
+    if (!model || bodyId <= 0 || bodyId >= model->nbody) return false;
+    const int geomCount = model->body_geomnum[bodyId];
+    const int firstGeom = model->body_geomadr[bodyId];
+    if (geomCount <= 0 || firstGeom < 0) return false;
+
+    const mjtNum sx = positiveOr(size.x(), 0.001);
+    const mjtNum sy = positiveOr(size.y(), sx);
+    const mjtNum sz = positiveOr(size.z(), sy);
+    for (int i = 0; i < geomCount; ++i) {
+        mjtNum* geomSize = model->geom_size + 3 * (firstGeom + i);
+        geomSize[0] = sx;
+        geomSize[1] = sy;
+        geomSize[2] = sz;
+    }
+    return true;
+}
+
+static bool scaleBodyGeoms(mjModel* model, int bodyId, const QVector3D& scale)
+{
+    if (!model || bodyId <= 0 || bodyId >= model->nbody) return false;
+    const int geomCount = model->body_geomnum[bodyId];
+    const int firstGeom = model->body_geomadr[bodyId];
+    if (geomCount <= 0 || firstGeom < 0) return false;
+
+    const mjtNum sx = positiveOr(scale.x(), 1.0);
+    const mjtNum sy = positiveOr(scale.y(), sx);
+    const mjtNum sz = positiveOr(scale.z(), sy);
+    for (int i = 0; i < geomCount; ++i) {
+        mjtNum* geomSize = model->geom_size + 3 * (firstGeom + i);
+        geomSize[0] *= sx;
+        geomSize[1] *= sy;
+        geomSize[2] *= sz;
+    }
+    return true;
+}
+
+int MujocoQuickItem::objectCount() const
+{
+    int count = 0;
+    withSimulation([&](const mjModel* model, mjData*) {
+        count = model->nbody > 0 ? model->nbody - 1 : 0;
+    });
+    return count;
+}
+
+SceneObjectInfo MujocoQuickItem::objectInfo(int index) const
+{
+    SceneObjectInfo result;
+    withSimulation([&](const mjModel* model, mjData* data) {
+        const int bodyId = index + 1;
+        if (bodyId <= 0 || bodyId >= model->nbody) return;
+        result = buildSceneObjectInfo(model, data, bodyId);
+    });
+    return result;
+}
+
+QVariantList MujocoQuickItem::objects() const
+{
+    QVariantList result;
+    withSimulation([&](const mjModel* model, mjData* data) {
+        result.reserve(model->nbody > 0 ? model->nbody - 1 : 0);
+        for (int bodyId = 1; bodyId < model->nbody; ++bodyId) {
+            result.append(QVariant::fromValue(buildSceneObjectInfo(model, data, bodyId)));
+        }
+    });
+    return result;
+}
+
+bool MujocoQuickItem::setObjectPosition(int bodyId, const QVector3D& position)
+{
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!sim.m_ || !sim.d_ || bodyId <= 0 || bodyId >= sim.m_->nbody) return;
+
+        const int freeJointId = freeJointIndexForBody(sim.m_, bodyId);
+        if (freeJointId >= 0) {
+            setFreeJointPosition(sim.m_, sim.d_,
+                                 sim.qpos_, sim.qpos_prev_,
+                                 freeJointId, position);
+        } else {
+            setBodyLocalPositionFromWorld(sim.m_, sim.d_, bodyId, position);
+            mj_setConst(sim.m_, sim.d_);
+        }
+        mj_forward(sim.m_, sim.d_);
+        markUiRefresh(sim);
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::setObjectSize(int bodyId, const QVector3D& size)
+{
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!sim.m_ || !sim.d_) return;
+        if (!setBodyGeomSize(sim.m_, bodyId, size)) return;
+        mj_setConst(sim.m_, sim.d_);
+        mj_forward(sim.m_, sim.d_);
+        markUiRefresh(sim);
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::scaleObject(int bodyId, const QVector3D& scale)
+{
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!sim.m_ || !sim.d_) return;
+        if (!scaleBodyGeoms(sim.m_, bodyId, scale)) return;
+        mj_setConst(sim.m_, sim.d_);
+        mj_forward(sim.m_, sim.d_);
+        markUiRefresh(sim);
+        applied = true;
+    });
+    return applied;
+}
 
 // ---------------------------------------------------------------------------
 // 接触快照构建：在 sim.mtx 锁内调用，读取当前帧所有接触并转成 ContactInfo 列表。
@@ -1254,24 +1849,61 @@ void MujocoQuickItem::renderThreadMain() {
 
 // ----------------------------------------------------------------- 物理线程 ----
 namespace {
-mjModel* loadModelFile(const QString& filename, mujoco::Simulate& sim) {
+struct LoadedModel {
+    mjModel* model = nullptr;
+    mjSpec* spec = nullptr;
+
+    ~LoadedModel() {
+        if (model) mj_deleteModel(model);
+        if (spec) mj_deleteSpec(spec);
+    }
+
+    LoadedModel() = default;
+    LoadedModel(const LoadedModel&) = delete;
+    LoadedModel& operator=(const LoadedModel&) = delete;
+
+    LoadedModel(LoadedModel&& other) noexcept
+        : model(other.model), spec(other.spec) {
+        other.model = nullptr;
+        other.spec = nullptr;
+    }
+
+    LoadedModel& operator=(LoadedModel&& other) noexcept {
+        if (this == &other) return *this;
+        if (model) mj_deleteModel(model);
+        if (spec) mj_deleteSpec(spec);
+        model = other.model;
+        spec = other.spec;
+        other.model = nullptr;
+        other.spec = nullptr;
+        return *this;
+    }
+};
+
+LoadedModel loadModelFile(const QString& filename, mujoco::Simulate& sim) {
     char err[kErrorLength] = "";
     QByteArray utf8 = filename.toLocal8Bit();
-    mjModel* m = nullptr;
+    LoadedModel result;
     if (filename.endsWith(".mjb", Qt::CaseInsensitive)) {
-        m = mj_loadModel(utf8.constData(), nullptr);
-        if (!m) std::strncpy(err, "could not load binary model", sizeof(err) - 1);
-    } else if (filename.endsWith(".xml", Qt::CaseInsensitive)) {
-        m = mj_loadXML(utf8.constData(), nullptr, err, sizeof(err));
+        result.model = mj_loadModel(utf8.constData(), nullptr);
+        if (!result.model) std::strncpy(err, "could not load binary model", sizeof(err) - 1);
     } else {
-        mjSpec* spec = mj_parse(utf8.constData(), nullptr, nullptr, err, sizeof(err));
-        if (spec) { m = mj_compile(spec, nullptr); mj_deleteSpec(spec); }
+        result.spec = filename.endsWith(".xml", Qt::CaseInsensitive)
+            ? mj_parseXML(utf8.constData(), nullptr, err, sizeof(err))
+            : mj_parse(utf8.constData(), nullptr, nullptr, err, sizeof(err));
+        if (result.spec) {
+            result.model = mj_compile(result.spec, nullptr);
+            if (!result.model) {
+                const char* specErr = mjs_getError(result.spec);
+                if (specErr && specErr[0]) std::strncpy(err, specErr, sizeof(err) - 1);
+            }
+        }
     }
-    if (!m) {
+    if (!result.model) {
         std::strncpy(sim.load_error, err, sizeof(sim.load_error) - 1);
         std::printf("loadModel error: %s\n", err);
     }
-    return m;
+    return result;
 }
 } // namespace
 
@@ -1292,13 +1924,18 @@ void MujocoQuickItem::physicsThreadMain() {
             QString file;
             { std::lock_guard<std::mutex> lk(m_pendingMtx); file = m_pendingFile; }
             sim.LoadMessage(file.toLocal8Bit().constData());
-            mjModel* mnew = loadModelFile(file, sim);
+            LoadedModel loaded = loadModelFile(file, sim);
+            mjModel* mnew = loaded.model;
             mjData*  dnew = mnew ? mj_makeData(mnew) : nullptr;
             if (dnew) {
                 sim.Load(mnew, dnew, file.toLocal8Bit().constData());
                 std::unique_lock<std::recursive_mutex> lk(sim.mtx);
                 if (d) mj_deleteData(d);
                 if (m) mj_deleteModel(m);
+                if (m_editSpec) mj_deleteSpec(m_editSpec);
+                m_editSpec = loaded.spec;
+                loaded.spec = nullptr;
+                loaded.model = nullptr;
                 m = mnew; d = dnew;
                 mj_forward(m, d);
                 lk.unlock();
@@ -1318,13 +1955,18 @@ void MujocoQuickItem::physicsThreadMain() {
         if (sim.uiloadrequest.load()) {
             sim.uiloadrequest.fetch_sub(1);
             sim.LoadMessage(sim.filename);
-            mjModel* mnew = loadModelFile(QString::fromLocal8Bit(sim.filename), sim);
+            LoadedModel loaded = loadModelFile(QString::fromLocal8Bit(sim.filename), sim);
+            mjModel* mnew = loaded.model;
             mjData*  dnew = mnew ? mj_makeData(mnew) : nullptr;
             if (dnew) {
                 sim.Load(mnew, dnew, sim.filename);
                 std::unique_lock<std::recursive_mutex> lk(sim.mtx);
                 if (d) mj_deleteData(d);
                 if (m) mj_deleteModel(m);
+                if (m_editSpec) mj_deleteSpec(m_editSpec);
+                m_editSpec = loaded.spec;
+                loaded.spec = nullptr;
+                loaded.model = nullptr;
                 m = mnew; d = dnew;
                 mj_forward(m, d);
                 lk.unlock();
@@ -1382,4 +2024,8 @@ void MujocoQuickItem::physicsThreadMain() {
 
     if (d) mj_deleteData(d);
     if (m) mj_deleteModel(m);
+    if (m_editSpec) {
+        mj_deleteSpec(m_editSpec);
+        m_editSpec = nullptr;
+    }
 }

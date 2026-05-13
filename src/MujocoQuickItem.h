@@ -21,8 +21,10 @@
 
 #include <QQuickFramebufferObject>
 #include <QString>
+#include <QStringList>
 #include <QSize>
 #include <QVariant>
+#include <QVector4D>
 #include <QtCore/qglobal.h>
 #include <atomic>
 #include <functional>
@@ -41,6 +43,10 @@ struct mjModel_;
 typedef mjModel_ mjModel;
 struct mjData_;
 typedef mjData_ mjData;
+struct mjSpec_;
+typedef mjSpec_ mjSpec;
+struct mjvScene_;
+typedef mjvScene_ mjvScene;
 
 namespace mujoco { class Simulate; }
 namespace mjqt { class QtPlatformUIAdapter; }
@@ -48,6 +54,8 @@ namespace mjqt { class QtPlatformUIAdapter; }
 #ifndef MUJOCOQUICKITEM_EXPORT
 #  define MUJOCOQUICKITEM_EXPORT
 #endif
+
+// https://www.zhihu.com/people/darboy/posts 这些教程好像不错，还有代码仓库：https://github.com/LitchiCheng/mujoco-learning
 
 class MUJOCOQUICKITEM_EXPORT MujocoQuickItem : public QQuickFramebufferObject, public mjqt::IMujocoHost {
     Q_OBJECT
@@ -68,6 +76,15 @@ class MUJOCOQUICKITEM_EXPORT MujocoQuickItem : public QQuickFramebufferObject, p
     Q_PROPERTY(QString modelTitle READ modelTitle NOTIFY modelTitleChanged)
     Q_PROPERTY(int contactCount READ contactCount NOTIFY contactsChanged)
 public:
+    enum PrimitiveType {
+        PrimitiveBox = 0,
+        PrimitiveSphere,
+        PrimitiveCapsule,
+        PrimitiveCylinder,
+        PrimitiveEllipsoid
+    };
+    Q_ENUM(PrimitiveType)
+
     explicit MujocoQuickItem(QQuickItem *parent = nullptr);
     ~MujocoQuickItem() override;
 
@@ -98,6 +115,72 @@ public:
     // saveSceneAsMjb: 将当前已编译的模型以 MuJoCo 二进制格式（.mjb）写入 filename。
     //   完全自包含：内嵌所有 mesh/纹理数据，无需原始资源文件即可重新加载。
     Q_INVOKABLE bool saveSceneAsMjb(const QString& filename);
+
+    // 向已加载的 XML 场景追加一个基础物体并重编译模型。
+    // type: PrimitiveBox、PrimitiveSphere、PrimitiveCapsule、PrimitiveCylinder 或 PrimitiveEllipsoid。
+    // size: box 为半尺寸 xyz；sphere 为 x 半径；capsule/cylinder 为 x 半径、y 半长；
+    //       ellipsoid 为 xyz 半径。freeJoint=true 时物体可自由运动。
+    // 注意：.mjb 场景没有可编辑的 mjSpec，调用会返回 false。
+    Q_INVOKABLE bool addPrimitive(PrimitiveType type,
+                                  const QVector3D& position = QVector3D(0.0f, 0.0f, 0.5f),
+                                  const QVector3D& size = QVector3D(0.1f, 0.1f, 0.1f),
+                                  double mass = 1.0,
+                                  bool freeJoint = true,
+                                  const QString& name = QString());
+
+    // 使用 MuJoCo 官方 user_scn 追加仅用于渲染的可视化几何体。
+    // 这些 geom 不参与碰撞/动力学，不会进入 objectCount()/objects()，也不会被保存到 .xml/.mjb。
+    // 返回 user_scn 中的 geom 下标；失败返回 -1。
+    Q_INVOKABLE int addVisualPrimitive(PrimitiveType type,
+                                       const QVector3D& position = QVector3D(0.0f, 0.0f, 0.5f),
+                                       const QVector3D& size = QVector3D(0.1f, 0.1f, 0.1f),
+                                       const QVector4D& rgba = QVector4D(0.2f, 0.6f, 0.9f, 1.0f));
+    // 批量追加可视化 geom；types 支持 PrimitiveType 枚举值，positions/sizes/rgba 支持 QVector3D/QVector4D 或数字列表。
+    // 返回每个新增 geom 的 user_scn 下标；任一输入非法时返回空列表且不修改场景。
+    Q_INVOKABLE QVariantList addVisualPrimitives(const QVariantList& positions,
+                                                 const QVariantList& types,
+                                                 const QVariantList& sizes,
+                                                 const QVariantList& rgba = QVariantList());
+    Q_INVOKABLE int visualPrimitiveCount() const;
+    Q_INVOKABLE bool setVisualPrimitivePosition(int index, const QVector3D& position);
+    Q_INVOKABLE bool setVisualPrimitiveSize(int index, const QVector3D& size);
+    Q_INVOKABLE void clearVisualPrimitives();
+
+    // 向 XML 场景追加静态碰撞障碍物并重编译模型。语义对应 MJCF worldbody/geom：
+    // mass=0、无 joint、contype/conaffinity 默认均为 1，可参与碰撞但不会被动力学推动。
+    // 返回新增 bodyId；失败返回 -1。.mjb 场景没有可编辑 mjSpec，会返回 -1。
+    Q_INVOKABLE int addStaticObstacle(PrimitiveType type,
+                                      const QVector3D& position = QVector3D(0.0f, 0.0f, 0.5f),
+                                      const QVector3D& size = QVector3D(0.1f, 0.1f, 0.1f),
+                                      const QVector4D& rgba = QVector4D(0.9f, 0.25f, 0.15f, 0.8f),
+                                      int contype = 1,
+                                      int conaffinity = 1,
+                                      const QString& name = QString());
+    // 批量追加静态障碍物，只重编译一次；返回新增 bodyId 列表。
+    Q_INVOKABLE QVariantList addStaticObstacles(const QVariantList& positions,
+                                                const QVariantList& types,
+                                                const QVariantList& sizes,
+                                                const QVariantList& rgba = QVariantList(),
+                                                int contype = 1,
+                                                int conaffinity = 1,
+                                                const QString& namePrefix = QString());
+
+    // ------------------------------------------------------------------
+    // 场景物体查询与编辑接口
+    // ------------------------------------------------------------------
+
+    // 返回场景 body 数量，不包含 MuJoCo world body。
+    Q_INVOKABLE int objectCount() const;
+    // 返回第 index 个场景 body 的基础属性；index 不包含 world body，越界返回空结构。
+    Q_INVOKABLE SceneObjectInfo objectInfo(int index) const;
+    // 以 QVariantList 形式返回全部场景 body 属性快照。
+    Q_INVOKABLE QVariantList objects() const;
+    // 按 MuJoCo body id 设置 body 位置。free joint body 写入 qpos；静态 body 修改 body_pos。
+    Q_INVOKABLE bool setObjectPosition(int bodyId, const QVector3D& position);
+    // 按 MuJoCo body id 设置其直属 geoms 的绝对 size 参数。
+    Q_INVOKABLE bool setObjectSize(int bodyId, const QVector3D& size);
+    // 按 MuJoCo body id 对其直属 geoms 的 size 参数做乘法缩放。
+    Q_INVOKABLE bool scaleObject(int bodyId, const QVector3D& scale);
 
     // ------------------------------------------------------------------
     // 关节查询与控制接口
@@ -293,6 +376,15 @@ private:
     bool ensureBackendStarted();
     // 设置最近一次错误信息 (线程安全)。
     void setLastError(const QString& err);
+    bool ensureUserSceneLocked(mujoco::Simulate& sim);
+    QVariantList addStaticObstacleRequests(const QVariantList& positions,
+                                           const QVariantList& types,
+                                           const QVariantList& sizes,
+                                           const QVariantList& rgba,
+                                           int contype,
+                                           int conaffinity,
+                                           const QString& namePrefix,
+                                           bool useExactSingleName);
 
     QString m_xmlPath;
 
@@ -302,6 +394,8 @@ private:
     std::unique_ptr<mujoco::Simulate>           m_sim;
     std::unique_ptr<mjqt::QtPlatformUIAdapter>  m_adapter;
     mjqt::QtPlatformUIAdapter*                  m_adapterRaw = nullptr;
+    mjvScene*                                   m_userScene = nullptr;
+    mjSpec*                                     m_editSpec = nullptr;
 
     std::thread       m_renderThread;
     std::thread       m_physicsThread;

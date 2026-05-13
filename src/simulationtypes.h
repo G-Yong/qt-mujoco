@@ -38,6 +38,56 @@ public:
 Q_DECLARE_METATYPE(JointInfo)
 
 // ---------------------------------------------------------------------------
+// SceneObjectInfo — 场景 body 的基础属性快照。objectCount()/objectInfo()
+// 返回的 index 不包含 world body；bodyId 是 MuJoCo 内部 body id，可用于编辑接口。
+//
+// 字段说明：
+//   bodyId / name         — body id 和名称；无名时用 "#<id>"。
+//   parentBodyId / parentName — 父 body。
+//   position             — body 当前世界坐标（来自 mjData::xpos）。
+//   localPosition        — body 相对父 body 的模型坐标（来自 mjModel::body_pos）。
+//   mass                 — body 质量。
+//   jointCount / geomCount — 当前 body 直属 joint / geom 数量。
+//   movable              — 是否有自由度；true 时位置通常由 qpos 控制。
+//   firstGeom*           — 第一个直属 geom 的基础信息，便于简单编辑器显示。
+// ---------------------------------------------------------------------------
+struct SceneObjectInfo {
+    Q_GADGET
+    Q_PROPERTY(int      bodyId       MEMBER bodyId       CONSTANT)
+    Q_PROPERTY(QString  name         MEMBER name         CONSTANT)
+    Q_PROPERTY(int      parentBodyId MEMBER parentBodyId CONSTANT)
+    Q_PROPERTY(QString  parentName   MEMBER parentName   CONSTANT)
+    Q_PROPERTY(QVector3D position    MEMBER position     CONSTANT)
+    Q_PROPERTY(QVector3D localPosition MEMBER localPosition CONSTANT)
+    Q_PROPERTY(double   mass         MEMBER mass         CONSTANT)
+    Q_PROPERTY(int      jointCount   MEMBER jointCount   CONSTANT)
+    Q_PROPERTY(int      geomCount    MEMBER geomCount    CONSTANT)
+    Q_PROPERTY(bool     movable      MEMBER movable      CONSTANT)
+    Q_PROPERTY(int      firstGeomId  MEMBER firstGeomId  CONSTANT)
+    Q_PROPERTY(QString  firstGeomName MEMBER firstGeomName CONSTANT)
+    Q_PROPERTY(int      firstGeomType MEMBER firstGeomType CONSTANT)
+    Q_PROPERTY(QString  firstGeomTypeName MEMBER firstGeomTypeName CONSTANT)
+    Q_PROPERTY(QVector3D firstGeomSize MEMBER firstGeomSize CONSTANT)
+public:
+    int      bodyId       = -1;
+    QString  name;
+    int      parentBodyId = -1;
+    QString  parentName;
+    QVector3D position;
+    QVector3D localPosition;
+    double   mass       = 0.0;
+    int      jointCount = 0;
+    int      geomCount  = 0;
+    bool     movable    = false;
+    int      firstGeomId = -1;
+    QString  firstGeomName;
+    int      firstGeomType = -1;
+    QString  firstGeomTypeName;
+    QVector3D firstGeomSize;
+};
+Q_DECLARE_METATYPE(SceneObjectInfo)
+
+// ---------------------------------------------------------------------------
 // ContactInfo — 单次接触（contact）的快照数据。支持 Q_GADGET，可在 QML 中读取。
 //
 // 由 MujocoQuickItem::contact(int) / contacts() 返回，每帧在物理锁内采样。
