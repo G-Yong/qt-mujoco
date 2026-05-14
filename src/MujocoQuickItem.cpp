@@ -533,14 +533,14 @@ bool MujocoQuickItem::addPrimitive(PrimitiveType type,
                                    double mass,
                                    bool freeJoint,
                                    const QString& name) {
+    QVariantList types;
     QVariantList positions;
     QVariantList sizes;
-    QVariantList types;
+    types.append(static_cast<int>(type));
     positions.append(QVariant::fromValue(position));
     sizes.append(QVariant::fromValue(size));
-    types.append(static_cast<int>(type));
 
-    const QVariantList bodyIds = addPrimitiveRequests(positions, types, sizes,
+    const QVariantList bodyIds = addPrimitiveRequests(types, positions, sizes,
                                                       mass, freeJoint, name, true);
     return !bodyIds.isEmpty();
 }
@@ -1151,16 +1151,16 @@ int MujocoQuickItem::addStaticObstacle(PrimitiveType type,
                                        int conaffinity,
                                        const QString& name)
 {
+    QVariantList types;
     QVariantList positions;
     QVariantList sizes;
     QVariantList colors;
-    QVariantList types;
+    types.append(static_cast<int>(type));
     positions.append(QVariant::fromValue(position));
     sizes.append(QVariant::fromValue(size));
     colors.append(QVariant::fromValue(rgba));
-    types.append(static_cast<int>(type));
 
-    const QVariantList bodyIds = addStaticObstacleRequests(positions, types, sizes, colors,
+    const QVariantList bodyIds = addStaticObstacleRequests(types, positions, sizes, colors,
                                                            contype, conaffinity, name, true);
     return bodyIds.isEmpty() ? -1 : bodyIds.first().toInt();
 }
