@@ -224,6 +224,8 @@ void MujocoQuickItem::closeScene() {
         delete m_userScene;
         m_userScene = nullptr;
     }
+    m_trajectories.clear();
+    m_staticVisualGeomCount = 0;
 
     m_sim.reset();
     // 渲染线程退出前已把 m_ctx / m_surface 的线程亲和性释放为 nullptr，
@@ -720,7 +722,7 @@ int MujocoQuickItem::addVisualPrimitive(PrimitiveType type,
     int addedIndex = -1;
     withSimulateLocked([&](mujoco::Simulate& sim) {
         if (!ensureUserSceneLocked(sim)) return;
-        if (m_userScene->ngeom >= m_userScene->maxgeom) {
+        if (m_staticVisualGeomCount >= m_userScene->maxgeom) {
             setLastError(QStringLiteral("MuJoCo user scene geom buffer is full"));
             return;
         }
@@ -736,9 +738,10 @@ int MujocoQuickItem::addVisualPrimitive(PrimitiveType type,
         fillPrimitiveSize(geomSize, geomType, size);
         copyVec3(geomPos, position);
 
-        addedIndex = m_userScene->ngeom++;
+        addedIndex = m_staticVisualGeomCount++;
         mjv_initGeom(m_userScene->geoms + addedIndex,
                      geomType, geomSize, geomPos, identity, color);
+        rebuildTrajectoryGeomsLocked();
         markUiRefresh(sim);
         setLastError(QString());
     });
@@ -770,7 +773,7 @@ QVariantList MujocoQuickItem::addVisualPrimitives(const QVariantList& positions,
     QVariantList addedIndices;
     withSimulateLocked([&](mujoco::Simulate& sim) {
         if (!ensureUserSceneLocked(sim)) return;
-        if (requests.size() > static_cast<size_t>(m_userScene->maxgeom - m_userScene->ngeom)) {
+        if (requests.size() > static_cast<size_t>(m_userScene->maxgeom - m_staticVisualGeomCount)) {
             setLastError(QStringLiteral("MuJoCo user scene geom buffer is full"));
             return;
         }
@@ -787,11 +790,12 @@ QVariantList MujocoQuickItem::addVisualPrimitives(const QVariantList& positions,
             fillPrimitiveSize(geomSize, request.geomType, request.size);
             copyVec3(geomPos, request.position);
 
-            const int addedIndex = m_userScene->ngeom++;
+            const int addedIndex = m_staticVisualGeomCount++;
             mjv_initGeom(m_userScene->geoms + addedIndex,
                          request.geomType, geomSize, geomPos, identity, color);
             addedIndices.append(addedIndex);
         }
+        rebuildTrajectoryGeomsLocked();
         markUiRefresh(sim);
         setLastError(QString());
     });
@@ -803,7 +807,7 @@ int MujocoQuickItem::visualPrimitiveCount() const
     int count = 0;
     if (!m_sim) return count;
     std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
-    if (m_userScene) count = m_userScene->ngeom;
+    count = m_staticVisualGeomCount;
     return count;
 }
 
@@ -811,7 +815,7 @@ bool MujocoQuickItem::setVisualPrimitivePosition(int index, const QVector3D& pos
 {
     bool applied = false;
     withSimulateLocked([&](mujoco::Simulate& sim) {
-        if (!m_userScene || index < 0 || index >= m_userScene->ngeom) return;
+        if (!m_userScene || index < 0 || index >= m_staticVisualGeomCount) return;
         copyVec3(m_userScene->geoms[index].pos, position);
         markUiRefresh(sim);
         applied = true;
@@ -823,7 +827,7 @@ bool MujocoQuickItem::setVisualPrimitiveSize(int index, const QVector3D& size)
 {
     bool applied = false;
     withSimulateLocked([&](mujoco::Simulate& sim) {
-        if (!m_userScene || index < 0 || index >= m_userScene->ngeom) return;
+        if (!m_userScene || index < 0 || index >= m_staticVisualGeomCount) return;
         fillPrimitiveSize(m_userScene->geoms[index].size,
                           m_userScene->geoms[index].type,
                           size);
@@ -837,10 +841,286 @@ void MujocoQuickItem::clearVisualPrimitives()
 {
     withSimulateLocked([&](mujoco::Simulate& sim) {
         if (!m_userScene) return;
-        m_userScene->ngeom = 0;
+        m_staticVisualGeomCount = 0;
+        rebuildTrajectoryGeomsLocked();
         markUiRefresh(sim);
         setLastError(QString());
     });
+}
+
+// ===========================================================================
+// 轨迹（尾迹）实现
+// ===========================================================================
+
+MujocoQuickItem::TrajectoryState* MujocoQuickItem::findTrajectory(int trajectoryId) {
+    for (TrajectoryState& t : m_trajectories) {
+        if (t.id == trajectoryId) return &t;
+    }
+    return nullptr;
+}
+
+const MujocoQuickItem::TrajectoryState* MujocoQuickItem::findTrajectory(int trajectoryId) const {
+    for (const TrajectoryState& t : m_trajectories) {
+        if (t.id == trajectoryId) return &t;
+    }
+    return nullptr;
+}
+
+void MujocoQuickItem::rebuildTrajectoryGeomsLocked() {
+    if (!m_userScene || !m_userScene->geoms) return;
+    int g = m_staticVisualGeomCount;
+    const int maxg = m_userScene->maxgeom;
+    for (const TrajectoryState& t : m_trajectories) {
+        if (!t.visible || t.points.size() < 2) continue;
+        const int geomType = t.useLine ? mjGEOM_LINE : mjGEOM_CAPSULE;
+        const float color[4] = {t.rgba.x(), t.rgba.y(), t.rgba.z(), t.rgba.w()};
+        for (size_t i = 1; i < t.points.size(); ++i) {
+            if (g >= maxg) break;
+            mjvGeom* geom = &m_userScene->geoms[g];
+            mjv_initGeom(geom, geomType, nullptr, nullptr, nullptr, color);
+            mjtNum from[3] = { t.points[i-1].x(), t.points[i-1].y(), t.points[i-1].z() };
+            mjtNum to[3]   = { t.points[i].x(),   t.points[i].y(),   t.points[i].z()   };
+            mjv_connector(geom, geomType, t.width, from, to);
+            ++g;
+        }
+        if (g >= maxg) break;
+    }
+    m_userScene->ngeom = g;
+}
+
+void MujocoQuickItem::sampleTrackedTrajectoriesLocked(const mjModel* m, const mjData* d) {
+    if (!m || !d) return;
+    bool anyChange = false;
+    for (TrajectoryState& t : m_trajectories) {
+        // 站点（site）优先于 body：若设置了 site，则解析其当前 id（每次都重新解析，
+        // 以容纳重编译/重加载导致的 id 变动）；否则使用 trackedBodyId。
+        QVector3D p;
+        bool have = false;
+        if (!t.trackedSiteName.isEmpty()) {
+            t.trackedSiteId = mj_name2id(m, mjOBJ_SITE, t.trackedSiteName.toUtf8().constData());
+            if (t.trackedSiteId >= 0 && t.trackedSiteId < m->nsite) {
+                const mjtNum* xp = d->site_xpos + 3 * t.trackedSiteId;
+                p = QVector3D(float(xp[0]), float(xp[1]), float(xp[2]));
+                have = true;
+            }
+        } else if (t.trackedBodyId >= 0 && t.trackedBodyId < m->nbody) {
+            const mjtNum* xp = d->xpos + 3 * t.trackedBodyId;
+            p = QVector3D(float(xp[0]), float(xp[1]), float(xp[2]));
+            have = true;
+        }
+        if (!have) continue;
+        if (!t.points.empty() && t.minDistance > 0.0) {
+            const QVector3D& last = t.points.back();
+            if ((p - last).length() < float(t.minDistance)) continue;
+        }
+        t.points.push_back(p);
+        while (static_cast<int>(t.points.size()) > t.maxPoints) t.points.pop_front();
+        anyChange = true;
+    }
+    if (anyChange) rebuildTrajectoryGeomsLocked();
+}
+
+int MujocoQuickItem::addTrajectory(int maxPoints,
+                                   float width,
+                                   const QVector4D& rgba,
+                                   bool useLine) {
+    if (maxPoints < 2) maxPoints = 2;
+    if (width <= 0.0f) width = 1.0f;
+    if (!m_sim) {
+        setLastError(QStringLiteral("Scene is not loaded"));
+        return -1;
+    }
+    int newId = -1;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!ensureUserSceneLocked(sim)) return;
+        TrajectoryState t;
+        t.id        = m_nextTrajectoryId++;
+        t.maxPoints = maxPoints;
+        t.width     = width;
+        t.rgba      = rgba;
+        t.useLine   = useLine;
+        m_trajectories.push_back(std::move(t));
+        newId = m_trajectories.back().id;
+        rebuildTrajectoryGeomsLocked();
+        markUiRefresh(sim);
+        setLastError(QString());
+    });
+    return newId;
+}
+
+bool MujocoQuickItem::removeTrajectory(int trajectoryId) {
+    bool removed = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        for (auto it = m_trajectories.begin(); it != m_trajectories.end(); ++it) {
+            if (it->id == trajectoryId) {
+                m_trajectories.erase(it);
+                removed = true;
+                break;
+            }
+        }
+        if (removed) {
+            rebuildTrajectoryGeomsLocked();
+            markUiRefresh(sim);
+        }
+    });
+    return removed;
+}
+
+void MujocoQuickItem::clearTrajectories() {
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (m_trajectories.empty()) return;
+        m_trajectories.clear();
+        rebuildTrajectoryGeomsLocked();
+        markUiRefresh(sim);
+    });
+}
+
+bool MujocoQuickItem::appendTrajectoryPoint(int trajectoryId, const QVector3D& point) {
+    bool ok = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        TrajectoryState* t = findTrajectory(trajectoryId);
+        if (!t) return;
+        t->points.push_back(point);
+        while (static_cast<int>(t->points.size()) > t->maxPoints) t->points.pop_front();
+        rebuildTrajectoryGeomsLocked();
+        markUiRefresh(sim);
+        ok = true;
+    });
+    return ok;
+}
+
+bool MujocoQuickItem::clearTrajectoryPoints(int trajectoryId) {
+    bool ok = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        TrajectoryState* t = findTrajectory(trajectoryId);
+        if (!t) return;
+        if (!t->points.empty()) {
+            t->points.clear();
+            rebuildTrajectoryGeomsLocked();
+            markUiRefresh(sim);
+        }
+        ok = true;
+    });
+    return ok;
+}
+
+int MujocoQuickItem::trajectoryCount() const {
+    int n = 0;
+    if (!m_sim) return n;
+    std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
+    n = static_cast<int>(m_trajectories.size());
+    return n;
+}
+
+int MujocoQuickItem::trajectoryPointCount(int trajectoryId) const {
+    int n = 0;
+    if (!m_sim) return n;
+    std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
+    const TrajectoryState* t = findTrajectory(trajectoryId);
+    if (t) n = static_cast<int>(t->points.size());
+    return n;
+}
+
+bool MujocoQuickItem::setTrajectoryVisible(int trajectoryId, bool visible) {
+    bool ok = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        TrajectoryState* t = findTrajectory(trajectoryId);
+        if (!t) return;
+        if (t->visible != visible) {
+            t->visible = visible;
+            rebuildTrajectoryGeomsLocked();
+            markUiRefresh(sim);
+        }
+        ok = true;
+    });
+    return ok;
+}
+
+bool MujocoQuickItem::setTrajectoryColor(int trajectoryId, const QVector4D& rgba) {
+    bool ok = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        TrajectoryState* t = findTrajectory(trajectoryId);
+        if (!t) return;
+        t->rgba = rgba;
+        rebuildTrajectoryGeomsLocked();
+        markUiRefresh(sim);
+        ok = true;
+    });
+    return ok;
+}
+
+bool MujocoQuickItem::setTrajectoryWidth(int trajectoryId, float width) {
+    if (width <= 0.0f) width = 1.0f;
+    bool ok = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        TrajectoryState* t = findTrajectory(trajectoryId);
+        if (!t) return;
+        t->width = width;
+        rebuildTrajectoryGeomsLocked();
+        markUiRefresh(sim);
+        ok = true;
+    });
+    return ok;
+}
+
+bool MujocoQuickItem::setTrajectoryMaxPoints(int trajectoryId, int maxPoints) {
+    if (maxPoints < 2) maxPoints = 2;
+    bool ok = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        TrajectoryState* t = findTrajectory(trajectoryId);
+        if (!t) return;
+        t->maxPoints = maxPoints;
+        bool changed = false;
+        while (static_cast<int>(t->points.size()) > t->maxPoints) {
+            t->points.pop_front();
+            changed = true;
+        }
+        if (changed) {
+            rebuildTrajectoryGeomsLocked();
+            markUiRefresh(sim);
+        }
+        ok = true;
+    });
+    return ok;
+}
+
+bool MujocoQuickItem::setTrajectoryTrackedBody(int trajectoryId,
+                                               int bodyId,
+                                               double minDistance) {
+    bool ok = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        TrajectoryState* t = findTrajectory(trajectoryId);
+        if (!t) return;
+        // 设置 body 跟踪时清空 site 跟踪（互斥）。
+        t->trackedSiteName.clear();
+        t->trackedSiteId  = -1;
+        t->trackedBodyId  = bodyId;
+        t->minDistance    = minDistance;
+        ok = true;
+    });
+    return ok;
+}
+
+bool MujocoQuickItem::setTrajectoryTrackedSite(int trajectoryId,
+                                               const QString& siteName,
+                                               double minDistance) {
+    bool ok = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        TrajectoryState* t = findTrajectory(trajectoryId);
+        if (!t) return;
+        t->trackedSiteName = siteName.trimmed();
+        // 立即尝试解析一次 id（若失败留 -1，由 sample 时再重试）。
+        if (!t->trackedSiteName.isEmpty() && sim.m_) {
+            t->trackedSiteId = mj_name2id(sim.m_, mjOBJ_SITE,
+                                          t->trackedSiteName.toUtf8().constData());
+        } else {
+            t->trackedSiteId = -1;
+        }
+        t->trackedBodyId = -1;
+        t->minDistance   = minDistance;
+        ok = true;
+    });
+    return ok;
 }
 
 int MujocoQuickItem::addStaticObstacle(PrimitiveType type,
@@ -1685,8 +1965,10 @@ void MujocoQuickItem::onFrameRendered() {
     QList<ContactInfo> contacts;
     if (m_sim) {
         std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
-        if (m_sim->m_ && m_sim->d_)
+        if (m_sim->m_ && m_sim->d_) {
             contacts = buildContactSnapshot(m_sim->m_, m_sim->d_);
+            sampleTrackedTrajectoriesLocked(m_sim->m_, m_sim->d_);
+        }
     }
 
     QMetaObject::invokeMethod(this, [this, statusText, contacts = std::move(contacts)] {

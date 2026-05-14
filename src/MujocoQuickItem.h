@@ -27,10 +27,12 @@
 #include <QVector4D>
 #include <QtCore/qglobal.h>
 #include <atomic>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 #include "IMujocoHost.h"
 #include "simulationtypes.h"
@@ -152,6 +154,47 @@ public:
     Q_INVOKABLE bool setVisualPrimitivePosition(int index, const QVector3D& position);
     Q_INVOKABLE bool setVisualPrimitiveSize(int index, const QVector3D& size);
     Q_INVOKABLE void clearVisualPrimitives();
+
+    // ------------------------------------------------------------------
+    // 轨迹（尾迹）可视化接口
+    // ------------------------------------------------------------------
+    // 用于绘制机械臂末端等运动轨迹。每条 trajectory 内部维护一个固定容量的
+    // 点位环形队列：append 新点超过 maxPoints 时丢弃最老点，然后在 user_scn
+    // 尾部用 mjv_connector 重建 N-1 段连线。轨迹仅用于渲染，不参与物理、
+    // 不会保存到 .xml / .mjb，与 addVisualPrimitive 共用 user_scn 但占用
+    // 尾部段，互不影响各自 index。
+    //
+    // useLine = true  → mjGEOM_LINE，width 单位为像素，永远朝向相机；
+    // useLine = false → mjGEOM_CAPSULE，width 单位为米（胶囊半径），受光照。
+    // 失败返回值：addTrajectory 返回 -1；其余 setter 返回 false（多数情况是
+    // trajectoryId 不存在或场景未加载）。
+    Q_INVOKABLE int addTrajectory(int maxPoints = 256,
+                                  float width = 2.0f,
+                                  const QVector4D& rgba = QVector4D(1.0f, 0.85f, 0.2f, 1.0f),
+                                  bool useLine = true);
+    Q_INVOKABLE bool removeTrajectory(int trajectoryId);
+    Q_INVOKABLE void clearTrajectories();
+    // 向指定轨迹追加一个采样点（世界坐标）。
+    Q_INVOKABLE bool appendTrajectoryPoint(int trajectoryId, const QVector3D& point);
+    // 清空指定轨迹的点位，但保留轨迹本体（仍可继续 append / 跟踪）。
+    Q_INVOKABLE bool clearTrajectoryPoints(int trajectoryId);
+    Q_INVOKABLE int  trajectoryCount() const;
+    Q_INVOKABLE int  trajectoryPointCount(int trajectoryId) const;
+    Q_INVOKABLE bool setTrajectoryVisible(int trajectoryId, bool visible);
+    Q_INVOKABLE bool setTrajectoryColor(int trajectoryId, const QVector4D& rgba);
+    Q_INVOKABLE bool setTrajectoryWidth(int trajectoryId, float width);
+    Q_INVOKABLE bool setTrajectoryMaxPoints(int trajectoryId, int maxPoints);
+    // 自动跟踪：每帧渲染回调中按当前 m, d 采样指定 body 的世界坐标（xpos）
+    // 并 append 到该轨迹。bodyId < 0 表示关闭跟踪；minDistance > 0 时只有
+    // 新点距上一点超过阈值才入队（避免静止时堆积重复点）。
+    Q_INVOKABLE bool setTrajectoryTrackedBody(int trajectoryId,
+                                              int bodyId,
+                                              double minDistance = 0.0);
+    // 自动跟踪：按 site 名采样其世界坐标（site_xpos）；适合直接绑定 TCP。
+    // siteName 为空表示关闭跟踪。
+    Q_INVOKABLE bool setTrajectoryTrackedSite(int trajectoryId,
+                                              const QString& siteName,
+                                              double minDistance = 0.0);
 
     // 向 XML 场景追加静态碰撞障碍物并重编译模型。语义对应 MJCF worldbody/geom：
     // mass=0、无 joint、contype/conaffinity 默认均为 1，可参与碰撞但不会被动力学推动。
@@ -444,4 +487,39 @@ private:
     // 接触快照：由 onFrameRendered() 在主线程更新，contactCount()/contact() 读取。
     // 仅在主线程访问，无需额外锁。
     QList<ContactInfo> m_contactSnapshot;
+
+    // ------------------------------------------------------------------
+    // 轨迹（尾迹）状态
+    // ------------------------------------------------------------------
+    // m_userScene 的 geoms 排布约定：
+    //   [0, m_staticVisualGeomCount)             → addVisualPrimitive 添加的静态几何
+    //   [m_staticVisualGeomCount, m_userScene->ngeom)
+    //                                            → 轨迹连线段（每次重建）
+    // 所有 m_trajectories / m_staticVisualGeomCount 的读写必须在持有
+    // m_sim->mtx 的前提下进行（与 m_userScene 一致）。
+    struct TrajectoryState {
+        int       id = -1;
+        int       maxPoints = 256;
+        float     width = 2.0f;
+        QVector4D rgba {1.0f, 0.85f, 0.2f, 1.0f};
+        bool      useLine = true;
+        bool      visible = true;
+        int       trackedBodyId = -1;
+        int       trackedSiteId = -1;
+        QString   trackedSiteName;
+        double    minDistance = 0.0;
+        std::deque<QVector3D> points;
+    };
+
+    int                          m_staticVisualGeomCount = 0;
+    std::vector<TrajectoryState> m_trajectories;
+    int                          m_nextTrajectoryId = 1;
+
+    // 必须在 m_sim->mtx 锁内调用：把 m_userScene 尾部的轨迹段全部重建。
+    void rebuildTrajectoryGeomsLocked();
+    // 必须在 m_sim->mtx 锁内调用：按当前 m, d 采样所有自动跟踪的轨迹。
+    void sampleTrackedTrajectoriesLocked(const mjModel* m, const mjData* d);
+    // 查找 trajectoryId 对应的状态，未找到返回 nullptr。
+    TrajectoryState*       findTrajectory(int trajectoryId);
+    const TrajectoryState* findTrajectory(int trajectoryId) const;
 };
