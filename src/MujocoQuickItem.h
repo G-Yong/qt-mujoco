@@ -127,6 +127,13 @@ public:
                                   double mass = 1.0,
                                   bool freeJoint = true,
                                   const QString& name = QString());
+    // 批量追加基础物体，只重编译一次；返回新增 bodyId 列表。
+    Q_INVOKABLE QVariantList addPrimitives(const QVariantList& positions,
+                                           const QVariantList& types,
+                                           const QVariantList& sizes,
+                                           double mass = 1.0,
+                                           bool freeJoint = true,
+                                           const QString& namePrefix = QString());
 
     // 使用 MuJoCo 官方 user_scn 追加仅用于渲染的可视化几何体。
     // 这些 geom 不参与碰撞/动力学，不会进入 objectCount()/objects()，也不会被保存到 .xml/.mjb。
@@ -377,6 +384,13 @@ private:
     // 设置最近一次错误信息 (线程安全)。
     void setLastError(const QString& err);
     bool ensureUserSceneLocked(mujoco::Simulate& sim);
+    QVariantList addPrimitiveRequests(const QVariantList& positions,
+                                      const QVariantList& types,
+                                      const QVariantList& sizes,
+                                      double mass,
+                                      bool freeJoint,
+                                      const QString& namePrefix,
+                                      bool useExactSingleName);
     QVariantList addStaticObstacleRequests(const QVariantList& positions,
                                            const QVariantList& types,
                                            const QVariantList& sizes,

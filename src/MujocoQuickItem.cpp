@@ -531,86 +531,132 @@ bool MujocoQuickItem::addPrimitive(PrimitiveType type,
                                    double mass,
                                    bool freeJoint,
                                    const QString& name) {
-    const int geomType = primitiveGeomType(type);
-    if (geomType == mjGEOM_NONE) {
-        setLastError(QStringLiteral("Unsupported primitive type: %1").arg(primitiveTypeName(type)));
-        return false;
+    QVariantList positions;
+    QVariantList sizes;
+    QVariantList types;
+    positions.append(QVariant::fromValue(position));
+    sizes.append(QVariant::fromValue(size));
+    types.append(static_cast<int>(type));
+
+    const QVariantList bodyIds = addPrimitiveRequests(positions, types, sizes,
+                                                      mass, freeJoint, name, true);
+    return !bodyIds.isEmpty();
+}
+
+QVariantList MujocoQuickItem::addPrimitives(const QVariantList& positions,
+                                            const QVariantList& types,
+                                            const QVariantList& sizes,
+                                            double mass,
+                                            bool freeJoint,
+                                            const QString& namePrefix)
+{
+    return addPrimitiveRequests(positions, types, sizes,
+                                mass, freeJoint, namePrefix, false);
+}
+
+QVariantList MujocoQuickItem::addPrimitiveRequests(const QVariantList& positions,
+                                                   const QVariantList& types,
+                                                   const QVariantList& sizes,
+                                                   double mass,
+                                                   bool freeJoint,
+                                                   const QString& namePrefix,
+                                                   bool useExactSingleName)
+{
+    std::vector<PrimitiveRequest> requests;
+    QString error;
+    const QString effectivePrefix = namePrefix.trimmed().isEmpty() ? QStringLiteral("primitive") : namePrefix.trimmed();
+    if (!buildPrimitiveRequests(positions, types, sizes, QVariantList(),
+                                QVector4D(0.2f, 0.6f, 0.9f, 1.0f),
+                                effectivePrefix, &requests, &error)) {
+        setLastError(error);
+        return {};
+    }
+    if (useExactSingleName && requests.size() == 1) {
+        requests[0].name = namePrefix.trimmed();
+    }
+    if (requests.empty()) {
+        setLastError(QString());
+        return {};
     }
 
     if (!m_sim) {
         setLastError(QStringLiteral("Scene is not loaded"));
-        return false;
+        return {};
     }
 
     mjModel* modelForReload = nullptr;
     mjData* dataForReload = nullptr;
     QByteArray displayedFilename;
+    std::vector<QString> addedBodyNames;
+    QVariantList bodyIds;
 
     {
         std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
         if (!m_sim->m_ || !m_sim->d_) {
             setLastError(QStringLiteral("Scene is not loaded"));
-            return false;
+            return {};
         }
         if (!m_editSpec) {
             setLastError(QStringLiteral("Current scene is not editable; load an XML scene before adding primitives"));
-            return false;
+            return {};
         }
 
         mjSpec* spec = mj_copySpec(m_editSpec);
         if (!spec) {
             setLastError(QStringLiteral("Failed to copy MuJoCo spec"));
-            return false;
+            return {};
         }
 
         if (!mj_copyBack(spec, m_sim->m_)) {
             mj_deleteSpec(spec);
             setLastError(QStringLiteral("Failed to copy current model values back to MuJoCo spec"));
-            return false;
+            return {};
         }
 
         mjsBody* world = mjs_findBody(spec, "world");
         if (!world) {
             mj_deleteSpec(spec);
             setLastError(QStringLiteral("Failed to find MuJoCo world body in spec"));
-            return false;
+            return {};
         }
 
-        mjsBody* body = mjs_addBody(world, nullptr);
-        mjsGeom* geom = body ? mjs_addGeom(body, nullptr) : nullptr;
-        if (!body || !geom) {
-            mj_deleteSpec(spec);
-            setLastError(QStringLiteral("Failed to add primitive body or geom"));
-            return false;
-        }
+        addedBodyNames.reserve(requests.size());
+        for (size_t i = 0; i < requests.size(); ++i) {
+            const PrimitiveRequest& request = requests[i];
+            const QString baseName = request.name.trimmed().isEmpty()
+                ? QStringLiteral("primitive_%1").arg(m_sim->m_->nbody + static_cast<int>(i))
+                : request.name;
+            const QString bodyName = uniqueObjectName(m_sim->m_, addedBodyNames, mjOBJ_BODY, baseName);
+            const QString geomName = uniqueObjectName(m_sim->m_, {}, mjOBJ_GEOM, bodyName + QStringLiteral("_geom"));
 
-        QString baseName = name.trimmed();
-        if (baseName.isEmpty()) baseName = QStringLiteral("primitive_%1").arg(m_sim->m_->nbody);
-        QString bodyName = baseName;
-        int suffix = 1;
-        while (mj_name2id(m_sim->m_, mjOBJ_BODY, bodyName.toUtf8().constData()) >= 0) {
-            bodyName = QStringLiteral("%1_%2").arg(baseName).arg(suffix++);
-        }
-        const QString geomName = bodyName + QStringLiteral("_geom");
+            mjsBody* body = mjs_addBody(world, nullptr);
+            mjsGeom* geom = body ? mjs_addGeom(body, nullptr) : nullptr;
+            if (!body || !geom) {
+                mj_deleteSpec(spec);
+                setLastError(QStringLiteral("Failed to add primitive body or geom"));
+                return {};
+            }
 
-        const QByteArray bodyNameUtf8 = bodyName.toUtf8();
-        const QByteArray geomNameUtf8 = geomName.toUtf8();
-        mjs_setName(body->element, bodyNameUtf8.constData());
-        mjs_setName(geom->element, geomNameUtf8.constData());
+            const QByteArray bodyNameUtf8 = bodyName.toUtf8();
+            const QByteArray geomNameUtf8 = geomName.toUtf8();
+            mjs_setName(body->element, bodyNameUtf8.constData());
+            mjs_setName(geom->element, geomNameUtf8.constData());
 
-        copyVec3(body->pos, position);
-        geom->type = static_cast<mjtGeom>(geomType);
-        setPrimitiveSize(geom, geomType, size);
-        if (mass > 0.0) geom->mass = mass;
-        geom->rgba[0] = 0.2f;
-        geom->rgba[1] = 0.6f;
-        geom->rgba[2] = 0.9f;
-        geom->rgba[3] = 1.0f;
+            copyVec3(body->pos, request.position);
+            geom->type = static_cast<mjtGeom>(request.geomType);
+            setPrimitiveSize(geom, request.geomType, request.size);
+            if (mass > 0.0) geom->mass = mass;
+            geom->rgba[0] = request.rgba.x();
+            geom->rgba[1] = request.rgba.y();
+            geom->rgba[2] = request.rgba.z();
+            geom->rgba[3] = request.rgba.w();
 
-        if (freeJoint && !mjs_addFreeJoint(body)) {
-            mj_deleteSpec(spec);
-            setLastError(QStringLiteral("Failed to add free joint to primitive body"));
-            return false;
+            if (freeJoint && !mjs_addFreeJoint(body)) {
+                mj_deleteSpec(spec);
+                setLastError(QStringLiteral("Failed to add free joint to primitive body"));
+                return {};
+            }
+            addedBodyNames.push_back(bodyName);
         }
 
         const int rc = mj_recompile(spec, nullptr, m_sim->m_, m_sim->d_);
@@ -618,10 +664,10 @@ bool MujocoQuickItem::addPrimitive(PrimitiveType type,
             const char* err = mjs_getError(spec);
             const QString reason = err && err[0]
                 ? QString::fromUtf8(err)
-                : QStringLiteral("Failed to recompile MuJoCo model after adding primitive");
+                : QStringLiteral("Failed to recompile MuJoCo model after adding primitives");
             mj_deleteSpec(spec);
             setLastError(reason);
-            return false;
+            return {};
         }
 
         mj_deleteSpec(m_editSpec);
@@ -631,12 +677,15 @@ bool MujocoQuickItem::addPrimitive(PrimitiveType type,
         // 在 [old_nq, new_nq) 范围会读到越界内存（可能为 0），并把它写回
         // d->qpos，从而把刚加入的 free-joint body 的位置 "清零" 到原点。
         resyncSimulateQposCaches(*m_sim);
-        const int addedBodyId = mj_name2id(m_sim->m_, mjOBJ_BODY, bodyNameUtf8.constData());
-        const int freeJointId = freeJointIndexForBody(m_sim->m_, addedBodyId);
-        if (freeJointId >= 0) {
-            setFreeJointPosition(m_sim->m_, m_sim->d_,
-                                 m_sim->qpos_, m_sim->qpos_prev_,
-                                 freeJointId, position);
+        for (size_t i = 0; i < addedBodyNames.size(); ++i) {
+            const int addedBodyId = mj_name2id(m_sim->m_, mjOBJ_BODY, addedBodyNames[i].toUtf8().constData());
+            bodyIds.append(addedBodyId);
+            const int freeJointId = freeJointIndexForBody(m_sim->m_, addedBodyId);
+            if (freeJointId >= 0) {
+                setFreeJointPosition(m_sim->m_, m_sim->d_,
+                                     m_sim->qpos_, m_sim->qpos_prev_,
+                                     freeJointId, requests[i].position);
+            }
         }
         mj_forward(m_sim->m_, m_sim->d_);
         markUiRefresh(*m_sim);
@@ -650,7 +699,7 @@ bool MujocoQuickItem::addPrimitive(PrimitiveType type,
     }
     setLastError(QString());
     requestRenderUpdate();
-    return true;
+    return bodyIds;
 }
 
 int MujocoQuickItem::addVisualPrimitive(PrimitiveType type,
