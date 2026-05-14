@@ -119,6 +119,13 @@ public:
     Q_INVOKABLE bool saveSceneAsMjb(const QString& filename);
 
     // 向已加载的 XML 场景追加一个基础物体并重编译模型。
+    // <worldbody>
+    // <body name="box1" pos="0 0 0.5">
+    //     <freejoint/>
+    //     <inertial mass="1.0" pos="0 0 0" diaginertia="0.001 0.001 0.001"/>
+    //     <geom type="box" size="0.1 0.1 0.1"/>
+    // </body>
+    // </worldbody>
     // type: PrimitiveBox、PrimitiveSphere、PrimitiveCapsule、PrimitiveCylinder 或 PrimitiveEllipsoid。
     // size: box 为半尺寸 xyz；sphere 为 x 半径；capsule/cylinder 为 x 半径、y 半长；
     //       ellipsoid 为 xyz 半径。freeJoint=true 时物体可自由运动。
@@ -206,6 +213,12 @@ public:
     Q_INVOKABLE QStringList siteNames() const;
 
     // 向 XML 场景追加静态碰撞障碍物并重编译模型。语义对应 MJCF worldbody/geom：
+    // <worldbody>
+    //   <geom name="obstacle1" type="box" pos="0 0 0.5"
+    //         size="0.1 0.1 0.1"
+    //         rgba="0.9 0.25 0.15 0.8"
+    //         contype="1" conaffinity="1"/>
+    // </worldbody>
     // mass=0、无 joint、contype/conaffinity 默认均为 1，可参与碰撞但不会被动力学推动。
     // 返回新增 bodyId；失败返回 -1。.mjb 场景没有可编辑 mjSpec，会返回 -1。
     Q_INVOKABLE int addStaticObstacle(PrimitiveType type,
