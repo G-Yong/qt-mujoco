@@ -970,7 +970,7 @@ static const char* const kJntTypeName[] = {"free", "ball", "slide", "hinge"};
 static SceneObjectInfo buildSceneObjectInfo(const mjModel* model, const mjData* data, int bodyId)
 {
     SceneObjectInfo info;
-    if (!model || !data || bodyId <= 0 || bodyId >= model->nbody) return info;
+    if (!model || !data || bodyId < 0 || bodyId >= model->nbody) return info;
 
     info.bodyId = bodyId;
     info.name = objectName(model, mjOBJ_BODY, bodyId);
@@ -996,7 +996,8 @@ static SceneObjectInfo buildSceneObjectInfo(const mjModel* model, const mjData* 
 
 static bool setBodyGeomSize(mjModel* model, int bodyId, const QVector3D& size)
 {
-    if (!model || bodyId <= 0 || bodyId >= model->nbody) return false;
+    if (!model || bodyId < 0 || bodyId >= model->nbody) return false;
+
     const int geomCount = model->body_geomnum[bodyId];
     const int firstGeom = model->body_geomadr[bodyId];
     if (geomCount <= 0 || firstGeom < 0) return false;
@@ -1015,7 +1016,7 @@ static bool setBodyGeomSize(mjModel* model, int bodyId, const QVector3D& size)
 
 static bool scaleBodyGeoms(mjModel* model, int bodyId, const QVector3D& scale)
 {
-    if (!model || bodyId <= 0 || bodyId >= model->nbody) return false;
+    if (!model || bodyId < 0 || bodyId >= model->nbody) return false;
     const int geomCount = model->body_geomnum[bodyId];
     const int firstGeom = model->body_geomadr[bodyId];
     if (geomCount <= 0 || firstGeom < 0) return false;
@@ -1036,7 +1037,7 @@ int MujocoQuickItem::objectCount() const
 {
     int count = 0;
     withSimulation([&](const mjModel* model, mjData*) {
-        count = model->nbody > 0 ? model->nbody - 1 : 0;
+        count = model->nbody;
     });
     return count;
 }
@@ -1045,9 +1046,8 @@ SceneObjectInfo MujocoQuickItem::objectInfo(int index) const
 {
     SceneObjectInfo result;
     withSimulation([&](const mjModel* model, mjData* data) {
-        const int bodyId = index + 1;
-        if (bodyId <= 0 || bodyId >= model->nbody) return;
-        result = buildSceneObjectInfo(model, data, bodyId);
+        if (index < 0 || index >= model->nbody) return;
+        result = buildSceneObjectInfo(model, data, index);
     });
     return result;
 }
@@ -1056,8 +1056,8 @@ QVariantList MujocoQuickItem::objects() const
 {
     QVariantList result;
     withSimulation([&](const mjModel* model, mjData* data) {
-        result.reserve(model->nbody > 0 ? model->nbody - 1 : 0);
-        for (int bodyId = 1; bodyId < model->nbody; ++bodyId) {
+        result.reserve(model->nbody);
+        for (int bodyId = 0; bodyId < model->nbody; ++bodyId) {
             result.append(QVariant::fromValue(buildSceneObjectInfo(model, data, bodyId)));
         }
     });
@@ -1068,7 +1068,7 @@ bool MujocoQuickItem::setObjectPosition(int bodyId, const QVector3D& position)
 {
     bool applied = false;
     withSimulateLocked([&](mujoco::Simulate& sim) {
-        if (!sim.m_ || !sim.d_ || bodyId <= 0 || bodyId >= sim.m_->nbody) return;
+        if (!sim.m_ || !sim.d_ || bodyId < 0 || bodyId >= sim.m_->nbody) return;
 
         const int freeJointId = freeJointIndexForBody(sim.m_, bodyId);
         if (freeJointId >= 0) {

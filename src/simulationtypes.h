@@ -39,7 +39,7 @@ Q_DECLARE_METATYPE(JointInfo)
 
 // ---------------------------------------------------------------------------
 // SceneObjectInfo — 场景 body 的基础属性快照。objectCount()/objectInfo()
-// 返回的 index 不包含 world body；bodyId 是 MuJoCo 内部 body id，可用于编辑接口。
+// 使用与 MuJoCo 一致的 body id，包含 world body (body id 0)。
 //
 // 字段说明：
 //   bodyId / name         — body id 和名称；无名时用 "#<id>"。

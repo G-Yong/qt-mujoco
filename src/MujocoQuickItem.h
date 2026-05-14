@@ -153,8 +153,8 @@ public:
                                       const QVector3D& position = QVector3D(0.0f, 0.0f, 0.5f),
                                       const QVector3D& size = QVector3D(0.1f, 0.1f, 0.1f),
                                       const QVector4D& rgba = QVector4D(0.9f, 0.25f, 0.15f, 0.8f),
-                                      int contype = 1,
-                                      int conaffinity = 1,
+                                      int contype = 1, // 位掩码，默认 1，表示与默认碰撞组发生碰撞；设置为 0 则不与任何物体发生碰撞。（允许我去碰别人）
+                                      int conaffinity = 1,// 位掩码，默认 1，表示属于默认碰撞组；仅当其他物体的 contype 与该值的按位与非零时才发生碰撞。（允许别人来碰我）
                                       const QString& name = QString());
     // 批量追加静态障碍物，只重编译一次；返回新增 bodyId 列表。
     Q_INVOKABLE QVariantList addStaticObstacles(const QVariantList& positions,
@@ -169,9 +169,9 @@ public:
     // 场景物体查询与编辑接口
     // ------------------------------------------------------------------
 
-    // 返回场景 body 数量，不包含 MuJoCo world body。
+    // 返回场景 body 数量，包含 MuJoCo world body (body id 0)。
     Q_INVOKABLE int objectCount() const;
-    // 返回第 index 个场景 body 的基础属性；index 不包含 world body，越界返回空结构。
+    // 返回第 index 个场景 body 的基础属性；index 与 MuJoCo body id 一致，越界返回空结构。
     Q_INVOKABLE SceneObjectInfo objectInfo(int index) const;
     // 以 QVariantList 形式返回全部场景 body 属性快照。
     Q_INVOKABLE QVariantList objects() const;
